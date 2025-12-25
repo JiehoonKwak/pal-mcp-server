@@ -1,6 +1,17 @@
 #!/usr/bin/env python3
+# /// script
+# requires-python = ">=3.11"
+# dependencies = [
+#     "google-genai>=1.0.0",
+#     "openai>=1.0.0",
+#     "pyyaml>=6.0",
+# ]
+# ///
 """
 PAL CodeReview - Comprehensive code review with external AI models.
+
+Run with uv (recommended):
+    uv run scripts/pal_codereview.py --files FILE [FILE ...] [options]
 
 Usage:
     python pal_codereview.py --files FILE [FILE ...] [options]

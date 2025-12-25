@@ -8,35 +8,37 @@
 # ]
 # ///
 """
-PAL Chat - Multi-turn conversational chat with external AI models.
+PAL Debug - Expert debugging analysis with external AI models.
+
+Provides systematic debugging assistance for complex issues with
+hypothesis generation, root cause analysis, and fix recommendations.
 
 Run with uv (recommended):
-    uv run scripts/pal_chat.py --prompt "Your question" [options]
+    uv run scripts/pal_debug.py --issue "Bug description" --files FILE [options]
 
 Usage:
-    python pal_chat.py --prompt "Your question" [options]
+    python pal_debug.py --issue "Bug description" --files FILE [options]
 
 Options:
-    --files FILE [FILE ...]      Files to include as context
-    --images IMAGE [IMAGE ...]   Images to include (paths or data URLs)
-    --model MODEL                Model to use (default: from config or auto)
-    --continuation-id ID         Continue existing conversation
-    --working-dir PATH           Working directory for artifacts
-    --temperature FLOAT          Temperature (0.0-2.0)
-    --thinking-mode MODE         Thinking mode (minimal/low/medium/high/max)
+    --issue ISSUE            Description of the bug/issue (required)
+    --files FILE [...]       Files to analyze (required)
+    --error-logs LOGS        Error logs or stack traces
+    --model MODEL            Model to use (default: from config)
+    --continuation-id ID     Continue existing debugging session
 
 Examples:
-    # Simple question
-    python pal_chat.py --prompt "How do I implement a binary search?"
+    # Debug with files
+    python pal_debug.py --issue "API returns 500 on login" \\
+        --files src/auth.py src/api.py
 
-    # With file context
-    python pal_chat.py --prompt "Review this code" --files src/main.py
+    # Debug with error logs
+    python pal_debug.py --issue "Memory leak in worker" \\
+        --files src/worker.py \\
+        --error-logs "OOMKilled at 2GB after 4 hours"
 
-    # Continue conversation
-    python pal_chat.py --prompt "What about edge cases?" --continuation-id <uuid>
-
-    # Use specific model
-    python pal_chat.py --prompt "Explain this" --model gemini-2.5-pro
+    # Continue debugging session
+    python pal_debug.py --issue "Check hypothesis 2" \\
+        --continuation-id <uuid>
 """
 
 import argparse
@@ -63,19 +65,18 @@ def load_prompt(prompt_name: str) -> str:
 
 def main():
     parser = argparse.ArgumentParser(
-        description="PAL Chat - Multi-turn conversational chat with external AI models"
+        description="PAL Debug - Expert debugging analysis with external AI models"
     )
-    parser.add_argument("--prompt", required=True, help="User prompt")
-    parser.add_argument("--files", nargs="*", default=[], help="Files to include as context")
-    parser.add_argument("--images", nargs="*", default=[], help="Images to include")
+    parser.add_argument("--issue", required=True, help="Description of the bug/issue")
+    parser.add_argument("--files", nargs="+", required=True, help="Files to analyze")
+    parser.add_argument("--error-logs", help="Error logs or stack traces")
     parser.add_argument("--model", help="Model to use (default: from config)")
-    parser.add_argument("--continuation-id", help="Continue existing conversation")
-    parser.add_argument("--working-dir", help="Working directory for artifacts")
-    parser.add_argument("--temperature", type=float, help="Temperature (0.0-2.0)")
+    parser.add_argument("--continuation-id", help="Continue existing debugging session")
     parser.add_argument(
         "--thinking-mode",
         choices=["minimal", "low", "medium", "high", "max"],
-        help="Thinking mode for extended reasoning",
+        default="high",
+        help="Thinking mode for analysis (default: high)",
     )
     parser.add_argument("--json", action="store_true", help="Output as JSON")
 
@@ -95,18 +96,18 @@ def main():
             if thread:
                 conversation_history = memory.build_history(thread)
             else:
-                # Thread not found, create new one
-                thread = memory.create_thread("chat", {"prompt": args.prompt})
+                thread = memory.create_thread("debug", {"issue": args.issue})
         else:
-            thread = memory.create_thread("chat", {"prompt": args.prompt})
+            thread = memory.create_thread("debug", {"issue": args.issue})
 
         # Load system prompt
-        system_prompt = load_prompt("chat")
+        system_prompt = load_prompt("debug")
 
-        # Read files if provided
-        file_content = ""
-        if args.files:
-            file_content = read_files(args.files, include_line_numbers=True)
+        # Read files
+        file_content = read_files(args.files, include_line_numbers=True)
+
+        if not file_content.strip():
+            raise ValueError("No valid files found to analyze")
 
         # Build user prompt
         user_prompt_parts = []
@@ -114,12 +115,22 @@ def main():
         if conversation_history:
             user_prompt_parts.append(conversation_history)
 
-        if file_content:
-            user_prompt_parts.append("=== FILES ===")
-            user_prompt_parts.append(file_content)
+        user_prompt_parts.append("=== ISSUE DESCRIPTION ===")
+        user_prompt_parts.append(args.issue)
 
-        user_prompt_parts.append("=== USER REQUEST ===")
-        user_prompt_parts.append(args.prompt)
+        if args.error_logs:
+            user_prompt_parts.append("\n=== ERROR LOGS ===")
+            user_prompt_parts.append(args.error_logs)
+
+        user_prompt_parts.append("\n=== CODE FILES ===")
+        user_prompt_parts.append(file_content)
+
+        user_prompt_parts.append("\n=== DEBUGGING REQUEST ===")
+        user_prompt_parts.append(
+            "Please analyze the issue above using systematic debugging methodology. "
+            "Generate hypotheses ranked by likelihood, identify root causes, "
+            "and provide minimal fixes with regression prevention."
+        )
 
         full_user_prompt = "\n\n".join(user_prompt_parts)
 
@@ -127,41 +138,30 @@ def main():
         model = args.model or config.get("defaults", {}).get("model", "auto")
         provider, resolved_model = get_provider(model, config)
 
-        # Get temperature and thinking mode
-        temperature = args.temperature
-        if temperature is None:
-            temperature = config.get("defaults", {}).get("temperature", 1.0)
-
-        thinking_mode = args.thinking_mode
-        if thinking_mode is None:
-            thinking_mode = config.get("defaults", {}).get("thinking_mode", "medium")
-
         # Execute request
         response = execute_request(
             provider=provider,
             prompt=full_user_prompt,
             model=resolved_model,
             system_prompt=system_prompt,
-            temperature=temperature,
-            thinking_mode=thinking_mode,
-            images=args.images if args.images else None,
+            temperature=0.5,  # Lower temperature for precise analysis
+            thinking_mode=args.thinking_mode,
         )
 
-        # Record turns for continuation
+        # Record turns
         memory.add_turn(
             thread_id=thread["thread_id"],
             role="user",
-            content=args.prompt,
-            files=args.files if args.files else None,
-            images=args.images if args.images else None,
-            tool_name="chat",
+            content=f"Debug: {args.issue}",
+            files=args.files,
+            tool_name="debug",
         )
 
         memory.add_turn(
             thread_id=thread["thread_id"],
             role="assistant",
             content=response["content"],
-            tool_name="chat",
+            tool_name="debug",
             model_name=resolved_model,
             model_provider=provider.provider_name,
         )
@@ -171,6 +171,8 @@ def main():
             "status": "success",
             "content": response["content"],
             "continuation_id": thread["thread_id"],
+            "issue": args.issue,
+            "files_analyzed": args.files,
             "model": resolved_model,
             "provider": provider.provider_name,
             "usage": response.get("usage", {}),
@@ -179,8 +181,10 @@ def main():
         if args.json:
             print(json.dumps(result, indent=2))
         else:
-            # Human-readable output
             print(f"\n{'='*60}")
+            print(f"Debug Analysis")
+            print(f"Issue: {args.issue}")
+            print(f"Files: {', '.join(args.files)}")
             print(f"Model: {resolved_model} via {provider.provider_name}")
             print(f"Continuation ID: {thread['thread_id']}")
             print(f"{'='*60}\n")
