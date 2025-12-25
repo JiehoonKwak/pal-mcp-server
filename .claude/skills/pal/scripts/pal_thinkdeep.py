@@ -1,6 +1,17 @@
 #!/usr/bin/env python3
+# /// script
+# requires-python = ">=3.11"
+# dependencies = [
+#     "google-genai>=1.0.0",
+#     "openai>=1.0.0",
+#     "pyyaml>=6.0",
+# ]
+# ///
 """
 PAL ThinkDeep - Deep systematic analysis with extended thinking.
+
+Run with uv (recommended):
+    uv run scripts/pal_thinkdeep.py --prompt "Complex problem" [options]
 
 Usage:
     python pal_thinkdeep.py --prompt "Complex problem to analyze" [options]

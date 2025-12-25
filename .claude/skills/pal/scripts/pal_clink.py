@@ -1,6 +1,15 @@
 #!/usr/bin/env python3
+# /// script
+# requires-python = ">=3.11"
+# dependencies = [
+#     "pyyaml>=6.0",
+# ]
+# ///
 """
 PAL Clink - CLI-to-CLI bridge for spawning AI CLIs.
+
+Run with uv (recommended):
+    uv run scripts/pal_clink.py --cli gemini --prompt "Your request" [options]
 
 Usage:
     python pal_clink.py --cli <cli_name> --prompt "Your request" [options]
