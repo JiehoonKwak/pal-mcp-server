@@ -1,0 +1,27 @@
+# Gemini CLI Configuration
+# =========================
+# Configuration for the Gemini CLI (google/generative-ai-cli)
+
+name: gemini
+command: gemini
+
+# Additional arguments always passed to the CLI
+additional_args:
+  - "--yolo"  # Skip confirmation prompts
+
+# Environment variables to set
+env: {}
+
+# Role presets
+roles:
+  default:
+    prompt_path: prompts/clink/default.md
+    role_args: []
+
+  planner:
+    prompt_path: prompts/clink/planner.md
+    role_args: []
+
+  codereviewer:
+    prompt_path: prompts/clink/codereviewer.md
+    role_args: []
