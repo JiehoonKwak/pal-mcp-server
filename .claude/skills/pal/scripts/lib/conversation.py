@@ -13,7 +13,7 @@ import sqlite3
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Optional
+from typing import Optional
 
 
 class InMemoryStorage:
@@ -55,13 +55,15 @@ class SQLiteStorage:
     def _init_db(self) -> None:
         """Initialize database schema."""
         with sqlite3.connect(self.db_path) as conn:
-            conn.execute("""
+            conn.execute(
+                """
                 CREATE TABLE IF NOT EXISTS conversations (
                     key TEXT PRIMARY KEY,
                     value TEXT NOT NULL,
                     expires_at REAL NOT NULL
                 )
-            """)
+            """
+            )
             conn.execute("CREATE INDEX IF NOT EXISTS idx_expires ON conversations(expires_at)")
 
     def set(self, key: str, value: dict, ttl: int = 10800) -> None:
@@ -146,8 +148,12 @@ class ConversationMemory:
             if k not in ["temperature", "thinking_mode", "model", "continuation_id"]
         }
 
+        # Extract parent_thread_id if continuing from another thread
+        parent_thread_id = initial_context.get("parent_thread_id", "")
+
         thread = {
             "thread_id": thread_id,
+            "parent_thread_id": parent_thread_id,  # For thread chaining
             "created_at": now,
             "last_updated_at": now,
             "tool_name": tool_name,
@@ -182,6 +188,7 @@ class ConversationMemory:
         tool_name: Optional[str] = None,
         model_name: Optional[str] = None,
         model_provider: Optional[str] = None,
+        model_metadata: Optional[dict] = None,
     ) -> bool:
         """
         Add a turn to the conversation.
@@ -195,6 +202,7 @@ class ConversationMemory:
             tool_name: Tool that generated this turn
             model_name: Model used (e.g., "gemini-2.5-flash")
             model_provider: Provider used (e.g., "google")
+            model_metadata: Optional metadata about the model response (tokens, thinking, etc.)
 
         Returns:
             True if successful, False otherwise
@@ -215,6 +223,7 @@ class ConversationMemory:
             "tool_name": tool_name,
             "model_name": model_name,
             "model_provider": model_provider,
+            "model_metadata": model_metadata,
         }
 
         thread["turns"].append(turn)
@@ -324,6 +333,85 @@ class ConversationMemory:
                     file_list.append(f)
 
         return file_list
+
+    def get_thread_chain(self, thread_id: str, max_depth: int = 20) -> list[dict]:
+        """
+        Traverse parent chain to get all threads in sequence.
+
+        This allows following the lineage of conversations across tool switches.
+
+        Args:
+            thread_id: Starting thread UUID
+            max_depth: Maximum chain depth to prevent infinite loops
+
+        Returns:
+            List of thread dictionaries in chronological order (oldest first)
+        """
+        chain = []
+        current_id = thread_id
+        seen_ids: set[str] = set()
+
+        while current_id and len(chain) < max_depth:
+            # Circular reference protection
+            if current_id in seen_ids:
+                break
+            seen_ids.add(current_id)
+
+            context = self.get_thread(current_id)
+            if not context:
+                break
+
+            chain.append(context)
+            current_id = context.get("parent_thread_id", "")
+
+        # Return in chronological order (oldest first)
+        chain.reverse()
+        return chain
+
+    def is_thread_expired(self, thread: dict) -> bool:
+        """
+        Check if a thread has expired based on timeout_hours.
+
+        Args:
+            thread: Thread dictionary
+
+        Returns:
+            True if thread has expired
+        """
+        if not thread or not thread.get("created_at"):
+            return True
+
+        try:
+            created = datetime.fromisoformat(thread["created_at"].replace("Z", "+00:00"))
+            now = datetime.now(timezone.utc)
+            age_hours = (now - created).total_seconds() / 3600
+            return age_hours > self.timeout_hours
+        except (ValueError, TypeError):
+            return True
+
+    def create_child_thread(self, parent_thread_id: str, tool_name: str, initial_context: dict) -> Optional[dict]:
+        """
+        Create a new thread that chains from a parent thread.
+
+        This is used when switching tools but continuing the conversation.
+
+        Args:
+            parent_thread_id: UUID of the parent thread
+            tool_name: Name of the new tool
+            initial_context: Initial context for the new thread
+
+        Returns:
+            New thread dictionary or None if parent not found
+        """
+        # Verify parent exists
+        parent = self.get_thread(parent_thread_id)
+        if not parent:
+            return None
+
+        # Create new thread with parent reference
+        context = dict(initial_context)
+        context["parent_thread_id"] = parent_thread_id
+        return self.create_thread(tool_name, context)
 
     @staticmethod
     def _is_valid_uuid(val: str) -> bool:

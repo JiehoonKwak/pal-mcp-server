@@ -47,9 +47,11 @@ from pathlib import Path
 # Add lib to path
 sys.path.insert(0, str(Path(__file__).parent / "lib"))
 
-from config import load_config
 from conversation import ConversationMemory
 from file_utils import read_files
+from workflow import AnalyzeWorkflow, AnalyzeWorkflowRequest
+
+from config import load_config
 from providers import execute_request, get_provider
 
 
@@ -62,9 +64,7 @@ def load_prompt(prompt_name: str) -> str:
 
 
 def main():
-    parser = argparse.ArgumentParser(
-        description="PAL Analyze - Holistic technical audit and strategic analysis"
-    )
+    parser = argparse.ArgumentParser(description="PAL Analyze - Holistic technical audit and strategic analysis")
     parser.add_argument("--prompt", required=True, help="Analysis question or focus area")
     parser.add_argument("--files", nargs="*", default=[], help="Files/directories to analyze")
     parser.add_argument("--model", help="Model to use (default: from config)")
@@ -77,6 +77,39 @@ def main():
     )
     parser.add_argument("--json", action="store_true", help="Output as JSON")
 
+    # Workflow parameters for multi-step analysis
+    parser.add_argument("--step", help="Analysis step description")
+    parser.add_argument("--step-number", type=int, default=1, help="Current step (1-based)")
+    parser.add_argument("--total-steps", type=int, default=5, help="Estimated total steps")
+    parser.add_argument(
+        "--next-step-required",
+        type=lambda x: x.lower() == "true",
+        default=True,
+        help="Continue analysis?",
+    )
+    parser.add_argument("--findings", help="Discoveries from this step")
+    parser.add_argument("--files-checked", nargs="*", default=[], help="All examined files")
+    parser.add_argument("--relevant-files", nargs="*", default=[], help="Files relevant to analysis")
+    parser.add_argument("--relevant-context", nargs="*", default=[], help="Relevant methods/functions")
+    parser.add_argument(
+        "--issues-found",
+        type=json.loads,
+        default=[],
+        help='Structured issues as JSON (e.g., \'[{"severity":"high","description":"..."}]\')',
+    )
+    parser.add_argument(
+        "--analysis-type",
+        choices=["architecture", "performance", "security", "quality", "general"],
+        default="general",
+        help="Type of analysis to perform",
+    )
+    parser.add_argument(
+        "--output-format",
+        choices=["summary", "detailed", "actionable"],
+        default="detailed",
+        help="Output format preference",
+    )
+
     args = parser.parse_args()
 
     try:
@@ -85,6 +118,9 @@ def main():
 
         # Initialize conversation memory
         memory = ConversationMemory(config)
+
+        # Check if this is a workflow step (step and findings provided)
+        is_workflow_mode = args.step is not None and args.findings is not None
 
         # Get or create conversation thread
         conversation_history = ""
@@ -96,6 +132,76 @@ def main():
                 thread = memory.create_thread("analyze", {"prompt": args.prompt})
         else:
             thread = memory.create_thread("analyze", {"prompt": args.prompt})
+
+        # Handle workflow mode
+        if is_workflow_mode:
+            workflow = AnalyzeWorkflow()
+
+            # Create workflow request
+            workflow_request = AnalyzeWorkflowRequest(
+                prompt=args.prompt,
+                step=args.step,
+                step_number=args.step_number,
+                total_steps=args.total_steps,
+                next_step_required=args.next_step_required,
+                findings=args.findings,
+                files_checked=args.files_checked,
+                relevant_files=args.relevant_files,
+                relevant_context=args.relevant_context,
+                issues_found=args.issues_found,
+                analysis_type=args.analysis_type,
+                output_format=args.output_format,
+                continuation_id=args.continuation_id or "",
+                absolute_file_paths=args.files,
+            )
+
+            # Accumulate step data
+            workflow.accumulate_step_data(workflow_request)
+
+            # Check if we should escalate to codereview
+            if workflow.should_call_expert_analysis(workflow.consolidated_findings):
+                result = {
+                    "status": "full_codereview_required",
+                    "important": "Please use pal's codereview tool instead",
+                    "reason": "Multiple high-severity issues found requiring detailed code review",
+                    "continuation_id": thread["thread_id"],
+                    "issues_summary": workflow.consolidated_findings.issues_found,
+                }
+
+                if args.json:
+                    print(json.dumps(result, indent=2))
+                else:
+                    print(f"\n{'='*60}")
+                    print("Analysis Escalation Required")
+                    print(f"{'='*60}\n")
+                    print("Multiple high-severity issues found.")
+                    print("Please use pal's codereview tool for detailed analysis.")
+                return
+
+            # Get step guidance if more steps needed
+            if args.next_step_required:
+                guidance = workflow.get_step_guidance(workflow_request)
+                result = workflow.format_step_response(
+                    workflow_request,
+                    {
+                        "guidance": guidance,
+                        "continuation_id": thread["thread_id"],
+                        "analysis_focus": args.prompt,
+                        "analysis_type": args.analysis_type,
+                        "output_format": args.output_format,
+                    },
+                )
+
+                if args.json:
+                    print(json.dumps(result, indent=2))
+                else:
+                    print(f"\n{'='*60}")
+                    print(f"Analysis Investigation - Step {args.step_number}/{args.total_steps}")
+                    print(f"Type: {args.analysis_type} | Format: {args.output_format}")
+                    print(f"{'='*60}\n")
+                    print(guidance)
+                    print(f"\n{'='*60}\n")
+                return
 
         # Load system prompt
         system_prompt = load_prompt("analyze")
@@ -110,6 +216,18 @@ def main():
 
         if conversation_history:
             user_prompt_parts.append(conversation_history)
+
+        # Add workflow context if in workflow mode
+        if is_workflow_mode:
+            user_prompt_parts.append("=== ANALYSIS CONTEXT ===")
+            user_prompt_parts.append(f"Step {args.step_number} of {args.total_steps}")
+            user_prompt_parts.append(f"Analysis type: {args.analysis_type}")
+            user_prompt_parts.append(f"Output format: {args.output_format}")
+            user_prompt_parts.append(f"Current step: {args.step}")
+            user_prompt_parts.append(f"Findings so far: {args.findings}")
+            if args.issues_found:
+                user_prompt_parts.append(f"Issues found: {len(args.issues_found)}")
+            user_prompt_parts.append("")
 
         user_prompt_parts.append("=== ANALYSIS REQUEST ===")
         user_prompt_parts.append(args.prompt)
@@ -175,7 +293,7 @@ def main():
             print(json.dumps(result, indent=2))
         else:
             print(f"\n{'='*60}")
-            print(f"Strategic Analysis")
+            print("Strategic Analysis")
             print(f"Focus: {args.prompt}")
             if args.files:
                 print(f"Files: {len(args.files)} analyzed")
@@ -186,10 +304,7 @@ def main():
             print(f"\n{'='*60}")
             if response.get("usage"):
                 usage = response["usage"]
-                print(
-                    f"Tokens: {usage.get('input_tokens', 'N/A')} in / "
-                    f"{usage.get('output_tokens', 'N/A')} out"
-                )
+                print(f"Tokens: {usage.get('input_tokens', 'N/A')} in / " f"{usage.get('output_tokens', 'N/A')} out")
             print(f"{'='*60}\n")
 
     except Exception as e:

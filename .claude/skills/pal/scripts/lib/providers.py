@@ -14,6 +14,140 @@ import time
 from abc import ABC, abstractmethod
 from typing import Any, Optional
 
+# Model capabilities registry
+MODEL_CAPABILITIES: dict[str, dict[str, Any]] = {
+    # Gemini models
+    "gemini-2.5-flash": {
+        "context_window": 1048576,
+        "thinking_modes": ["minimal", "low", "medium", "high", "max"],
+        "supports_images": True,
+        "supports_json_mode": True,
+        "max_thinking_tokens": 24576,
+    },
+    "gemini-2.5-pro": {
+        "context_window": 2097152,
+        "thinking_modes": ["minimal", "low", "medium", "high", "max"],
+        "supports_images": True,
+        "supports_json_mode": True,
+        "max_thinking_tokens": 24576,
+    },
+    "gemini-2.0-flash": {
+        "context_window": 1048576,
+        "thinking_modes": [],
+        "supports_images": True,
+        "supports_json_mode": True,
+    },
+    # OpenAI models
+    "gpt-4o": {
+        "context_window": 128000,
+        "thinking_modes": [],
+        "supports_images": True,
+        "supports_json_mode": True,
+    },
+    "gpt-4o-mini": {
+        "context_window": 128000,
+        "thinking_modes": [],
+        "supports_images": True,
+        "supports_json_mode": True,
+    },
+    "o1": {
+        "context_window": 200000,
+        "thinking_modes": [],
+        "supports_images": False,
+        "supports_json_mode": True,
+        "fixed_temperature": True,
+    },
+    "o1-mini": {
+        "context_window": 128000,
+        "thinking_modes": [],
+        "supports_images": False,
+        "supports_json_mode": True,
+        "fixed_temperature": True,
+    },
+    "o3-mini": {
+        "context_window": 200000,
+        "thinking_modes": ["low", "medium", "high"],
+        "supports_images": False,
+        "supports_json_mode": True,
+        "fixed_temperature": True,
+    },
+    # Claude models (via OpenRouter)
+    "claude-sonnet-4-20250514": {
+        "context_window": 200000,
+        "thinking_modes": [],
+        "supports_images": True,
+        "supports_json_mode": True,
+    },
+    "claude-3.5-sonnet": {
+        "context_window": 200000,
+        "thinking_modes": [],
+        "supports_images": True,
+        "supports_json_mode": True,
+    },
+    # Grok models
+    "grok-3": {
+        "context_window": 131072,
+        "thinking_modes": [],
+        "supports_images": False,
+        "supports_json_mode": True,
+    },
+    "grok-2": {
+        "context_window": 131072,
+        "thinking_modes": [],
+        "supports_images": False,
+        "supports_json_mode": True,
+    },
+}
+
+# Default capabilities for unknown models
+DEFAULT_CAPABILITIES: dict[str, Any] = {
+    "context_window": 128000,
+    "thinking_modes": [],
+    "supports_images": False,
+    "supports_json_mode": True,
+}
+
+
+def get_model_capabilities(model_name: str) -> dict[str, Any]:
+    """
+    Get capabilities for a model.
+
+    Args:
+        model_name: The model name
+
+    Returns:
+        Dictionary of model capabilities
+    """
+    # Check exact match
+    if model_name in MODEL_CAPABILITIES:
+        return MODEL_CAPABILITIES[model_name]
+
+    # Check prefix match for versioned models
+    model_lower = model_name.lower()
+    for name, caps in MODEL_CAPABILITIES.items():
+        # Match base name (e.g., "gpt-4o" matches "gpt-4o-2024-05-13")
+        if model_lower.startswith(name.lower()):
+            return caps
+        # Match model family (e.g., "gemini" matches any gemini model)
+        base_name = name.split("-")[0]
+        if model_lower.startswith(base_name):
+            return caps
+
+    # Return default capabilities
+    return DEFAULT_CAPABILITIES.copy()
+
+
+def supports_thinking_mode(model_name: str, mode: str) -> bool:
+    """Check if a model supports a specific thinking mode."""
+    caps = get_model_capabilities(model_name)
+    return mode in caps.get("thinking_modes", [])
+
+
+def get_context_window(model_name: str) -> int:
+    """Get the context window size for a model."""
+    caps = get_model_capabilities(model_name)
+    return caps.get("context_window", 128000)
+
 
 class BaseProvider(ABC):
     """Abstract base class for AI providers."""
