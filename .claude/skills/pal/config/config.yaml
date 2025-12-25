@@ -28,10 +28,32 @@ defaults:
   temperature: 1.0
 
   # Thinking mode for models that support it (minimal/low/medium/high/max)
-  thinking_mode: "medium"
+  thinking_mode: "high"
 
   # Locale for localized responses (e.g., "Korean", "Japanese", "Spanish")
   locale: ""
+
+# Limits
+# ------
+limits:
+  # Maximum prompt size in characters
+  prompt_size: 60000
+
+  # Consensus tool timeout in seconds
+  consensus_timeout: 120
+
+  # Maximum response characters for clink output
+  max_response_chars: 20000
+
+# Token Allocation
+# ----------------
+# Model-specific token allocation settings
+token_allocation:
+  default:
+    context_window: 128000
+    response_tokens: 8192
+    file_percentage: 0.6       # 60% of context for file content
+    history_percentage: 0.3    # 30% for conversation history
 
 # Conversation Memory
 # -------------------

@@ -49,9 +49,11 @@ from pathlib import Path
 # Add lib to path
 sys.path.insert(0, str(Path(__file__).parent / "lib"))
 
-from config import load_config
 from conversation import ConversationMemory
 from file_utils import read_files
+from workflow import DebugWorkflow, DebugWorkflowRequest
+
+from config import load_config
 from providers import execute_request, get_provider
 
 
@@ -64,9 +66,7 @@ def load_prompt(prompt_name: str) -> str:
 
 
 def main():
-    parser = argparse.ArgumentParser(
-        description="PAL Debug - Expert debugging analysis with external AI models"
-    )
+    parser = argparse.ArgumentParser(description="PAL Debug - Expert debugging analysis with external AI models")
     parser.add_argument("--issue", required=True, help="Description of the bug/issue")
     parser.add_argument("--files", nargs="+", required=True, help="Files to analyze")
     parser.add_argument("--error-logs", help="Error logs or stack traces")
@@ -80,6 +80,28 @@ def main():
     )
     parser.add_argument("--json", action="store_true", help="Output as JSON")
 
+    # Workflow parameters for multi-step investigation
+    parser.add_argument("--step", help="Investigation step description")
+    parser.add_argument("--step-number", type=int, default=1, help="Current step (1-based)")
+    parser.add_argument("--total-steps", type=int, default=5, help="Estimated total steps")
+    parser.add_argument(
+        "--next-step-required",
+        type=lambda x: x.lower() == "true",
+        default=True,
+        help="Continue investigation?",
+    )
+    parser.add_argument("--findings", help="Discoveries from this step")
+    parser.add_argument("--files-checked", nargs="*", default=[], help="All examined files")
+    parser.add_argument("--relevant-files", nargs="*", default=[], help="Files relevant to issue")
+    parser.add_argument("--relevant-context", nargs="*", default=[], help="Relevant methods/functions")
+    parser.add_argument("--hypothesis", help="Current root cause theory")
+    parser.add_argument(
+        "--confidence",
+        choices=["exploring", "low", "medium", "high", "very_high", "almost_certain", "certain"],
+        default="exploring",
+        help="Investigation confidence level",
+    )
+
     args = parser.parse_args()
 
     try:
@@ -88,6 +110,9 @@ def main():
 
         # Initialize conversation memory
         memory = ConversationMemory(config)
+
+        # Check if this is a workflow step (step and findings provided)
+        is_workflow_mode = args.step is not None and args.findings is not None
 
         # Get or create conversation thread
         conversation_history = ""
@@ -99,6 +124,80 @@ def main():
                 thread = memory.create_thread("debug", {"issue": args.issue})
         else:
             thread = memory.create_thread("debug", {"issue": args.issue})
+
+        # Handle workflow mode
+        if is_workflow_mode:
+            workflow = DebugWorkflow()
+
+            # Create workflow request
+            workflow_request = DebugWorkflowRequest(
+                prompt=args.issue,
+                step=args.step,
+                step_number=args.step_number,
+                total_steps=args.total_steps,
+                next_step_required=args.next_step_required,
+                findings=args.findings,
+                files_checked=args.files_checked,
+                relevant_files=args.relevant_files,
+                relevant_context=args.relevant_context,
+                hypothesis=args.hypothesis or "",
+                confidence=args.confidence,
+                continuation_id=args.continuation_id or "",
+                absolute_file_paths=args.files,
+            )
+
+            # Accumulate step data
+            workflow.accumulate_step_data(workflow_request)
+
+            # Check if we should skip expert analysis (certain confidence)
+            if args.confidence == "certain" and not args.next_step_required:
+                result = {
+                    "status": "certain_confidence_proceed_with_fix",
+                    "message": "Investigation complete with CERTAIN confidence. Proceed with fix.",
+                    "continuation_id": thread["thread_id"],
+                    "investigation": {
+                        "findings": workflow.consolidated_findings.findings,
+                        "files_checked": list(workflow.consolidated_findings.files_checked),
+                        "relevant_files": list(workflow.consolidated_findings.relevant_files),
+                        "hypothesis": args.hypothesis,
+                        "confidence": args.confidence,
+                    },
+                }
+
+                if args.json:
+                    print(json.dumps(result, indent=2))
+                else:
+                    print(f"\n{'='*60}")
+                    print("Investigation Complete - CERTAIN Confidence")
+                    print(f"Hypothesis: {args.hypothesis}")
+                    print(f"{'='*60}\n")
+                    print("Proceed with implementing the fix.")
+                return
+
+            # Get step guidance if more steps needed
+            if args.next_step_required:
+                guidance = workflow.get_step_guidance(workflow_request)
+                result = workflow.format_step_response(
+                    workflow_request,
+                    {
+                        "guidance": guidance,
+                        "continuation_id": thread["thread_id"],
+                        "issue": args.issue,
+                        "current_hypothesis": args.hypothesis,
+                        "current_confidence": args.confidence,
+                    },
+                )
+
+                if args.json:
+                    print(json.dumps(result, indent=2))
+                else:
+                    print(f"\n{'='*60}")
+                    print(f"Debug Investigation - Step {args.step_number}/{args.total_steps}")
+                    print(f"Confidence: {args.confidence}")
+                    print(f"{'='*60}\n")
+                    print(guidance)
+                    print(f"\n{'='*60}\n")
+                return
 
         # Load system prompt
         system_prompt = load_prompt("debug")
@@ -114,6 +213,17 @@ def main():
 
         if conversation_history:
             user_prompt_parts.append(conversation_history)
+
+        # Add workflow context if in workflow mode
+        if is_workflow_mode:
+            user_prompt_parts.append("=== INVESTIGATION CONTEXT ===")
+            user_prompt_parts.append(f"Step {args.step_number} of {args.total_steps}")
+            user_prompt_parts.append(f"Current step: {args.step}")
+            user_prompt_parts.append(f"Findings so far: {args.findings}")
+            if args.hypothesis:
+                user_prompt_parts.append(f"Current hypothesis: {args.hypothesis}")
+            user_prompt_parts.append(f"Confidence level: {args.confidence}")
+            user_prompt_parts.append("")
 
         user_prompt_parts.append("=== ISSUE DESCRIPTION ===")
         user_prompt_parts.append(args.issue)
@@ -182,7 +292,7 @@ def main():
             print(json.dumps(result, indent=2))
         else:
             print(f"\n{'='*60}")
-            print(f"Debug Analysis")
+            print("Debug Analysis")
             print(f"Issue: {args.issue}")
             print(f"Files: {', '.join(args.files)}")
             print(f"Model: {resolved_model} via {provider.provider_name}")
@@ -192,10 +302,7 @@ def main():
             print(f"\n{'='*60}")
             if response.get("usage"):
                 usage = response["usage"]
-                print(
-                    f"Tokens: {usage.get('input_tokens', 'N/A')} in / "
-                    f"{usage.get('output_tokens', 'N/A')} out"
-                )
+                print(f"Tokens: {usage.get('input_tokens', 'N/A')} in / " f"{usage.get('output_tokens', 'N/A')} out")
             print(f"{'='*60}\n")
 
     except Exception as e:
