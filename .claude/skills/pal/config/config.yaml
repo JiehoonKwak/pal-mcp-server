@@ -1,0 +1,67 @@
+# PAL Skills Configuration
+# =========================
+# Configure API keys, defaults, and conversation settings.
+# Values can use ${ENV_VAR} syntax to reference environment variables.
+
+version: "1.0"
+
+# API Keys
+# --------
+# Set at least one API key to use PAL.
+# You can also set these as environment variables:
+#   GEMINI_API_KEY, OPENAI_API_KEY, XAI_API_KEY,
+#   OPENROUTER_API_KEY, CUSTOM_API_URL
+api_keys:
+  gemini: ${GEMINI_API_KEY}
+  openai: ${OPENAI_API_KEY}
+  xai: ${XAI_API_KEY}
+  openrouter: ${OPENROUTER_API_KEY}
+  custom_url: ${CUSTOM_API_URL}  # For Ollama or other OpenAI-compatible APIs
+
+# Default Settings
+# ----------------
+defaults:
+  # Model selection: "auto" selects best available, or specify like "gemini-2.5-flash"
+  model: "auto"
+
+  # Temperature for generation (0.0-2.0)
+  temperature: 1.0
+
+  # Thinking mode for models that support it (minimal/low/medium/high/max)
+  thinking_mode: "medium"
+
+  # Locale for localized responses (e.g., "Korean", "Japanese", "Spanish")
+  locale: ""
+
+# Conversation Memory
+# -------------------
+conversation:
+  # Maximum turns per conversation thread
+  max_turns: 50
+
+  # Hours before conversation expires
+  timeout_hours: 3
+
+  # Storage type: "memory" (in-process) or "sqlite" (persistent)
+  storage: "memory"
+
+# Model Restrictions (Optional)
+# -----------------------------
+# Limit which models can be used (empty = all allowed)
+restrictions:
+  google_allowed_models: []
+  openai_allowed_models: []
+  xai_allowed_models: []
+  openrouter_allowed_models: []
+
+# CLI Clients for Clink
+# ---------------------
+cli_clients:
+  # Default CLI to use
+  default: "gemini"
+
+  # Enabled CLIs
+  enabled:
+    - gemini
+    - claude
+    - codex

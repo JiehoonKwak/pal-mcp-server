@@ -1,0 +1,30 @@
+# Claude CLI Configuration
+# ========================
+# Configuration for Claude Code CLI
+
+name: claude
+command: claude
+
+# Additional arguments always passed to the CLI
+additional_args:
+  - "--permission-mode"
+  - "acceptEdits"
+  - "--model"
+  - "sonnet"
+
+# Environment variables to set
+env: {}
+
+# Role presets
+roles:
+  default:
+    prompt_path: prompts/clink/default.md
+    role_args: []
+
+  planner:
+    prompt_path: prompts/clink/planner.md
+    role_args: []
+
+  codereviewer:
+    prompt_path: prompts/clink/codereviewer.md
+    role_args: []
