@@ -16,7 +16,7 @@ api_keys:
   openai: ${OPENAI_API_KEY}
   xai: ${XAI_API_KEY}
   openrouter: ${OPENROUTER_API_KEY}
-  custom_url: ${CUSTOM_API_URL}  # For Ollama or other OpenAI-compatible APIs
+  custom_url: ${CUSTOM_API_URL} # For Ollama or other OpenAI-compatible APIs
 
 # Default Settings
 # ----------------
@@ -24,36 +24,14 @@ defaults:
   # Model selection: "auto" selects best available, or specify like "gemini-2.5-flash"
   model: "auto"
 
+  # Default model for OpenRouter when using auto mode
+  openrouter_model: "google/gemini-3-flash-preview"
+
   # Temperature for generation (0.0-2.0)
   temperature: 1.0
 
   # Thinking mode for models that support it (minimal/low/medium/high/max)
   thinking_mode: "high"
-
-  # Locale for localized responses (e.g., "Korean", "Japanese", "Spanish")
-  locale: ""
-
-# Limits
-# ------
-limits:
-  # Maximum prompt size in characters
-  prompt_size: 60000
-
-  # Consensus tool timeout in seconds
-  consensus_timeout: 120
-
-  # Maximum response characters for clink output
-  max_response_chars: 20000
-
-# Token Allocation
-# ----------------
-# Model-specific token allocation settings
-token_allocation:
-  default:
-    context_window: 128000
-    response_tokens: 8192
-    file_percentage: 0.6       # 60% of context for file content
-    history_percentage: 0.3    # 30% for conversation history
 
 # Conversation Memory
 # -------------------
@@ -69,21 +47,14 @@ conversation:
 
 # Model Restrictions (Optional)
 # -----------------------------
-# Limit which models can be used (empty = all allowed)
+# Limit which models can be used (empty list = all allowed)
+# Uses partial matching: "flash" matches "gemini-2.5-flash"
+# Example:
+#   google_allowed_models: ["flash", "pro"]
+#   openrouter_allowed_models: ["claude", "gpt-4"]
 restrictions:
   google_allowed_models: []
   openai_allowed_models: []
   xai_allowed_models: []
-  openrouter_allowed_models: []
+  openrouter_allowed_models: ["google/gemini-3-flash-preview", "x-ai/grok-4"]
 
-# CLI Clients for Clink
-# ---------------------
-cli_clients:
-  # Default CLI to use
-  default: "gemini"
-
-  # Enabled CLIs
-  enabled:
-    - gemini
-    - claude
-    - codex

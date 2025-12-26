@@ -8,30 +8,31 @@
 # ]
 # ///
 """
-PAL CodeReview - Comprehensive code review with external AI models.
+PAL Precommit - Pre-commit validation tool with AI review.
 
 Run with uv (recommended):
-    uv run scripts/pal_codereview.py --files FILE [FILE ...] [options]
+    uv run scripts/pal_precommit.py --files FILE [FILE ...] [options]
 
 Usage:
-    python pal_codereview.py --files FILE [FILE ...] [options]
+    python pal_precommit.py --files FILE [FILE ...] [options]
 
 Options:
-    --files FILE [FILE ...]    Files to review (required)
-    --prompt PROMPT            Additional review instructions
-    --focus AREA [AREA ...]    Focus areas (security, performance, etc.)
+    --files FILE [FILE ...]    Files to validate (required)
+    --focus AREA               Focus area (security, performance, testing)
     --model MODEL              Model to use (default: from config)
-    --continuation-id ID       Continue existing review conversation
+    --continuation-id ID       Continue existing conversation
+    --thinking-mode MODE       Thinking mode (default: high)
+    --json                     Output as JSON
 
 Examples:
-    # Basic code review
-    python pal_codereview.py --files src/main.py
+    # Basic pre-commit validation
+    python pal_precommit.py --files src/main.py
 
-    # Review with focus
-    python pal_codereview.py --files src/auth.py --focus security
+    # Focus on security
+    python pal_precommit.py --files src/auth.py --focus security
 
-    # Review multiple files
-    python pal_codereview.py --files src/*.py --focus performance maintainability
+    # Validate multiple files
+    python pal_precommit.py --files src/*.py --focus performance
 """
 
 import argparse
@@ -43,11 +44,11 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent / "lib"))
 
 from agentic import build_agentic_response, infer_confidence  # noqa: E402
-from conversation import ConversationMemory
-from file_utils import read_files
+from conversation import ConversationMemory  # noqa: E402
+from file_utils import read_files  # noqa: E402
 
-from config import load_config
-from providers import execute_request, get_provider
+from config import load_config  # noqa: E402
+from providers import execute_request, get_provider  # noqa: E402
 
 
 def load_prompt(prompt_name: str) -> str:
@@ -58,20 +59,29 @@ def load_prompt(prompt_name: str) -> str:
     return ""
 
 
+def check_for_issues(response_content: str) -> bool:
+    """Check if the response contains issues that need attention."""
+    content_upper = response_content.upper()
+    severity_markers = ["[CRITICAL]", "[HIGH]", "[MEDIUM]", "[LOW]"]
+    return any(marker in content_upper for marker in severity_markers)
+
+
 def main():
-    parser = argparse.ArgumentParser(description="PAL CodeReview - Comprehensive code review with external AI models")
-    parser.add_argument("--files", nargs="+", required=True, help="Files to review")
-    parser.add_argument("--prompt", help="Additional review instructions")
+    parser = argparse.ArgumentParser(description="PAL Precommit - Pre-commit validation with AI review")
+    parser.add_argument("--files", nargs="+", required=True, help="Files to validate")
     parser.add_argument(
         "--focus",
-        nargs="*",
-        default=[],
-        choices=["security", "performance", "maintainability", "architecture", "testing"],
-        help="Focus areas for the review",
+        choices=["security", "performance", "testing"],
+        help="Focus area for the review",
     )
     parser.add_argument("--model", help="Model to use (default: from config)")
     parser.add_argument("--continuation-id", help="Continue existing conversation")
-    parser.add_argument("--thinking-mode", choices=["minimal", "low", "medium", "high", "max"])
+    parser.add_argument(
+        "--thinking-mode",
+        choices=["minimal", "low", "medium", "high", "max"],
+        default="high",
+        help="Thinking mode (default: high)",
+    )
     parser.add_argument("--json", action="store_true", help="Output as JSON")
 
     args = parser.parse_args()
@@ -90,18 +100,18 @@ def main():
             if thread:
                 conversation_history = memory.build_history(thread)
             else:
-                thread = memory.create_thread("codereview", {"files": args.files})
+                thread = memory.create_thread("precommit", {"files": args.files})
         else:
-            thread = memory.create_thread("codereview", {"files": args.files})
+            thread = memory.create_thread("precommit", {"files": args.files})
 
         # Load system prompt
-        system_prompt = load_prompt("codereview")
+        system_prompt = load_prompt("precommit")
 
-        # Read files
+        # Read files with line numbers
         file_content = read_files(args.files, include_line_numbers=True)
 
         if not file_content.strip():
-            raise ValueError("No valid files found to review")
+            raise ValueError("No valid files found to validate")
 
         # Build user prompt
         user_prompt_parts = []
@@ -109,24 +119,19 @@ def main():
         if conversation_history:
             user_prompt_parts.append(conversation_history)
 
-        user_prompt_parts.append("=== CODE TO REVIEW ===")
+        user_prompt_parts.append("=== CODE TO VALIDATE ===")
         user_prompt_parts.append(file_content)
 
-        # Add focus areas
+        # Add focus area
         if args.focus:
-            user_prompt_parts.append("\n=== FOCUS AREAS ===")
-            user_prompt_parts.append(f"Please focus on: {', '.join(args.focus)}")
+            user_prompt_parts.append("\n=== FOCUS AREA ===")
+            user_prompt_parts.append(f"Please focus on: {args.focus}")
 
-        # Add custom prompt
-        if args.prompt:
-            user_prompt_parts.append("\n=== ADDITIONAL INSTRUCTIONS ===")
-            user_prompt_parts.append(args.prompt)
-
-        user_prompt_parts.append("\n=== REVIEW REQUEST ===")
+        user_prompt_parts.append("\n=== VALIDATION REQUEST ===")
         user_prompt_parts.append(
-            "Please review the code above following the guidelines in your system prompt. "
-            "Identify issues by severity (Critical > High > Medium > Low) and provide "
-            "actionable fixes with specific line references."
+            "Please validate the code above for commit readiness. "
+            "Identify any issues by severity (CRITICAL > HIGH > MEDIUM > LOW) "
+            "that should be addressed before committing."
         )
 
         full_user_prompt = "\n\n".join(user_prompt_parts)
@@ -135,19 +140,14 @@ def main():
         model = args.model or config.get("defaults", {}).get("model", "auto")
         provider, resolved_model = get_provider(model, config)
 
-        # Get thinking mode
-        thinking_mode = args.thinking_mode
-        if thinking_mode is None:
-            thinking_mode = config.get("defaults", {}).get("thinking_mode", "medium")
-
-        # Execute request
+        # Execute request with high thinking mode
         response = execute_request(
             provider=provider,
             prompt=full_user_prompt,
             model=resolved_model,
             system_prompt=system_prompt,
-            temperature=0.7,  # Lower temperature for precise analysis
-            thinking_mode=thinking_mode,
+            temperature=0.7,
+            thinking_mode=args.thinking_mode,
             config=config,
         )
 
@@ -155,31 +155,34 @@ def main():
         memory.add_turn(
             thread_id=thread["thread_id"],
             role="user",
-            content=f"Review files: {', '.join(args.files)}" + (f"\n{args.prompt}" if args.prompt else ""),
+            content=f"Validate files: {', '.join(args.files)}" + (f"\nFocus: {args.focus}" if args.focus else ""),
             files=args.files,
-            tool_name="codereview",
+            tool_name="precommit",
         )
 
         memory.add_turn(
             thread_id=thread["thread_id"],
             role="assistant",
             content=response["content"],
-            tool_name="codereview",
+            tool_name="precommit",
             model_name=resolved_model,
             model_provider=provider.provider_name,
         )
+
+        # Check for issues in response to set confidence
+        has_warnings = check_for_issues(response["content"])
 
         # Infer confidence from response
         confidence = infer_confidence(
             response["content"],
             has_errors=False,
-            has_warnings=True,
-            has_actionable_items=True,
+            has_warnings=has_warnings,
+            has_actionable_items=has_warnings,
         )
 
-        # Build agentic result with rich metadata
+        # Build agentic result
         result = build_agentic_response(
-            tool_name="codereview",
+            tool_name="precommit",
             status="success",
             content=response["content"],
             continuation_id=thread["thread_id"],
@@ -193,15 +196,16 @@ def main():
         if args.json:
             print(json.dumps(result, indent=2))
         else:
-            # Human-readable output with agentic metadata
+            # Human-readable output
             print(f"\n{'=' * 60}")
-            print("Code Review")
+            print("Pre-commit Validation")
             print(f"Files: {', '.join(args.files)}")
             if args.focus:
-                print(f"Focus: {', '.join(args.focus)}")
+                print(f"Focus: {args.focus}")
             print(f"Model: {resolved_model} via {provider.provider_name}")
             print(f"Continuation ID: {thread['thread_id']}")
             print(f"Confidence: {confidence}")
+            print(f"Issues Found: {'Yes' if has_warnings else 'No'}")
             print(f"{'=' * 60}\n")
             print(response["content"])
             print(f"\n{'=' * 60}")

@@ -73,7 +73,6 @@ def load_config(config_path: Optional[Path] = None) -> dict:
             "model": "auto",
             "temperature": 1.0,
             "thinking_mode": "medium",
-            "locale": "",
         },
         "conversation": {
             "max_turns": 50,
@@ -83,10 +82,6 @@ def load_config(config_path: Optional[Path] = None) -> dict:
         "restrictions": {
             "google_allowed_models": [],
             "openai_allowed_models": [],
-        },
-        "cli_clients": {
-            "default": "gemini",
-            "enabled": ["gemini", "claude", "codex"],
         },
     }
 

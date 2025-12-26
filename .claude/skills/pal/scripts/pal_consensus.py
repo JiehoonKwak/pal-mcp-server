@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+#!/usr/bin/env -S uv run
 # /// script
 # requires-python = ">=3.11"
 # dependencies = [
@@ -50,9 +50,11 @@ from pathlib import Path
 # Add lib to path
 sys.path.insert(0, str(Path(__file__).parent / "lib"))
 
-from config import load_config
+from agentic import build_agentic_response  # noqa: E402
 from conversation import ConversationMemory
 from file_utils import read_files
+
+from config import load_config
 from providers import execute_request, get_provider
 
 
@@ -139,9 +141,7 @@ def get_stance_prompt(stance: str) -> str:
 
 
 def main():
-    parser = argparse.ArgumentParser(
-        description="PAL Consensus - Multi-model consensus building with stance support"
-    )
+    parser = argparse.ArgumentParser(description="PAL Consensus - Multi-model consensus building with stance support")
     parser.add_argument("--proposal", required=True, help="The proposal or question to evaluate")
     parser.add_argument(
         "--models",
@@ -208,7 +208,7 @@ def main():
         # Collect responses from each model
         model_responses = []
 
-        for i, (model_name, stance) in enumerate(zip(args.models, stances)):
+        for _i, (model_name, stance) in enumerate(zip(args.models, stances)):
             try:
                 # Get provider and model
                 provider, resolved_model = get_provider(model_name, config)
@@ -226,6 +226,7 @@ def main():
                     temperature=0.7,
                     thinking_mode="medium",
                     images=args.images if args.images else None,
+                    config=config,
                 )
 
                 model_responses.append(
@@ -279,34 +280,39 @@ def main():
             tool_name="consensus",
         )
 
-        # Build result
-        result = {
-            "status": "success",
-            "proposal": args.proposal,
-            "continuation_id": thread["thread_id"],
-            "models_consulted": [
-                {"model": r["model"], "stance": r["stance"], "status": r["status"]} for r in model_responses
+        # Build agentic result - consensus has high confidence by design
+        result = build_agentic_response(
+            tool_name="consensus",
+            status="success",
+            content=json.dumps(model_responses, indent=2),
+            continuation_id=thread["thread_id"],
+            model=f"{len(successful_responses)} models consulted",
+            provider="multi-model",
+            confidence="high",
+            files_examined=args.files if args.files else [],
+            additional_next_actions=[
+                "Synthesize all perspectives above",
+                "Identify key agreements and disagreements",
+                "Form consolidated recommendation",
             ],
-            "responses": model_responses,
-            "next_steps": (
-                "CONSENSUS GATHERING IS COMPLETE. Synthesize all perspectives and present:\n"
-                "1. Key points of AGREEMENT across models\n"
-                "2. Key points of DISAGREEMENT and why they differ\n"
-                "3. Your final consolidated recommendation\n"
-                "4. Specific, actionable next steps for implementation\n"
-                "5. Critical risks or concerns that must be addressed"
-            ),
-        }
+        )
+        # Add consensus-specific fields
+        result["proposal"] = args.proposal
+        result["models_consulted"] = [
+            {"model": r["model"], "stance": r["stance"], "status": r["status"]} for r in model_responses
+        ]
+        result["responses"] = model_responses
 
         if args.json:
             print(json.dumps(result, indent=2))
         else:
-            print(f"\n{'='*60}")
-            print(f"Consensus Analysis")
+            print(f"\n{'=' * 60}")
+            print("Consensus Analysis")
             print(f"Proposal: {args.proposal}")
-            print(f"Models: {len(args.models)} consulted")
+            print(f"Models: {len(args.models)} consulted ({len(successful_responses)} successful)")
             print(f"Continuation ID: {thread['thread_id']}")
-            print(f"{'='*60}\n")
+            print(f"Confidence: {result['agentic']['confidence']}")
+            print(f"{'=' * 60}\n")
 
             for response in model_responses:
                 print(f"\n--- {response['model']} ({response['stance']}) ---")
@@ -315,10 +321,14 @@ def main():
                 else:
                     print(f"Error: {response.get('error', 'Unknown error')}")
 
-            print(f"\n{'='*60}")
-            print("NEXT STEPS:")
-            print(result["next_steps"])
-            print(f"{'='*60}\n")
+            print(f"\n{'=' * 60}")
+            print("AGENTIC METADATA:")
+            print(f"  Escalation path: {result['agentic'].get('escalation_path', 'N/A')}")
+            print(f"  Related tools: {', '.join(result['agentic']['related_tools'])}")
+            print("\nNEXT ACTIONS:")
+            for i, action in enumerate(result["agentic"]["next_actions"], 1):
+                print(f"  {i}. {action}")
+            print(f"{'=' * 60}\n")
 
     except Exception as e:
         error_result = {

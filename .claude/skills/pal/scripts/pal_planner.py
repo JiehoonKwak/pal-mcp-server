@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+#!/usr/bin/env -S uv run
 # /// script
 # requires-python = ">=3.11"
 # dependencies = [
@@ -48,6 +48,7 @@ from pathlib import Path
 # Add lib to path
 sys.path.insert(0, str(Path(__file__).parent / "lib"))
 
+from agentic import build_agentic_response, infer_confidence  # noqa: E402
 from conversation import ConversationMemory
 from file_utils import read_files
 from workflow import ConsolidatedFindings, WorkflowRequest, WorkflowTool
@@ -257,16 +258,16 @@ def main():
                 if args.json:
                     print(json.dumps(result, indent=2))
                 else:
-                    print(f"\n{'='*60}")
+                    print(f"\n{'=' * 60}")
                     print("Planning Complete")
                     print(f"Task: {args.task}")
-                    print(f"{'='*60}\n")
+                    print(f"{'=' * 60}\n")
                     print(args.plan_summary)
                     if args.risks:
                         print("\n--- Identified Risks ---")
                         for risk in args.risks:
                             print(f"- {risk.get('name', 'Unknown')}: {risk.get('mitigation', 'No mitigation')}")
-                    print(f"\n{'='*60}\n")
+                    print(f"\n{'=' * 60}\n")
                 return
 
             # Get step guidance if more steps needed
@@ -285,13 +286,13 @@ def main():
                 if args.json:
                     print(json.dumps(result, indent=2))
                 else:
-                    print(f"\n{'='*60}")
+                    print(f"\n{'=' * 60}")
                     print(f"Planning - Step {args.step_number}/{args.total_steps}")
                     if args.current_phase:
                         print(f"Phase: {args.current_phase}")
-                    print(f"{'='*60}\n")
+                    print(f"{'=' * 60}\n")
                     print(guidance)
-                    print(f"\n{'='*60}\n")
+                    print(f"\n{'=' * 60}\n")
                 return
 
         # Load system prompt
@@ -361,6 +362,7 @@ def main():
             system_prompt=system_prompt,
             temperature=0.7,
             thinking_mode=args.thinking_mode,
+            config=config,
         )
 
         # Record turns
@@ -381,35 +383,50 @@ def main():
             model_provider=provider.provider_name,
         )
 
-        # Build result
-        result = {
-            "status": "success",
-            "content": response["content"],
-            "continuation_id": thread["thread_id"],
-            "task": args.task,
-            "files_analyzed": args.files if args.files else None,
-            "model": resolved_model,
-            "provider": provider.provider_name,
-            "usage": response.get("usage", {}),
-        }
+        # Infer confidence from response
+        confidence = infer_confidence(
+            response["content"], has_errors=False, has_warnings=False, has_actionable_items=True
+        )
+
+        # Build agentic result
+        result = build_agentic_response(
+            tool_name="planner",
+            status="success",
+            content=response["content"],
+            continuation_id=thread["thread_id"],
+            model=resolved_model,
+            provider=provider.provider_name,
+            usage=response.get("usage", {}),
+            confidence=confidence,
+            files_examined=args.files if args.files else [],
+        )
 
         if args.json:
             print(json.dumps(result, indent=2))
         else:
-            print(f"\n{'='*60}")
+            print(f"\n{'=' * 60}")
             print("Implementation Plan")
             print(f"Task: {args.task}")
             if args.files:
                 print(f"Files: {len(args.files)} analyzed")
             print(f"Model: {resolved_model} via {provider.provider_name}")
             print(f"Continuation ID: {thread['thread_id']}")
-            print(f"{'='*60}\n")
+            print(f"{'=' * 60}\n")
             print(response["content"])
-            print(f"\n{'='*60}")
+            print(f"\n{'=' * 60}")
+            # Show agentic metadata
+            agentic = result.get("agentic", {})
+            print(f"Confidence: {agentic.get('confidence', 'N/A')}")
+            if agentic.get("next_actions"):
+                print("Suggested next actions:")
+                for action in agentic["next_actions"][:3]:
+                    print(f"  - {action}")
+            if agentic.get("escalation_path"):
+                print(f"Escalation path: {agentic['escalation_path']}")
             if response.get("usage"):
                 usage = response["usage"]
-                print(f"Tokens: {usage.get('input_tokens', 'N/A')} in / " f"{usage.get('output_tokens', 'N/A')} out")
-            print(f"{'='*60}\n")
+                print(f"Tokens: {usage.get('input_tokens', 'N/A')} in / {usage.get('output_tokens', 'N/A')} out")
+            print(f"{'=' * 60}\n")
 
     except Exception as e:
         error_result = {

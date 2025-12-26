@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+#!/usr/bin/env -S uv run
 # /// script
 # requires-python = ">=3.11"
 # dependencies = [
@@ -36,14 +36,22 @@ Examples:
 import argparse
 import json
 import os
+import re
 import subprocess
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 
 # Add lib to path
 sys.path.insert(0, str(Path(__file__).parent / "lib"))
 
-from config import load_cli_client, load_config
+from agentic import build_agentic_response  # noqa: E402
+
+from config import load_cli_client
+
+# Output size limits (matches MCP server)
+MAX_RESPONSE_CHARS = 20_000
+SUMMARY_PATTERN = re.compile(r"<SUMMARY>(.*?)</SUMMARY>", re.IGNORECASE | re.DOTALL)
 
 
 def load_role_prompt(role_path: str) -> str:
@@ -54,6 +62,90 @@ def load_role_prompt(role_path: str) -> str:
     if prompt_path.exists():
         return prompt_path.read_text(encoding="utf-8")
     return ""
+
+
+def extract_summary(content: str) -> str | None:
+    """Extract <SUMMARY> block from content if present."""
+    match = SUMMARY_PATTERN.search(content)
+    if not match:
+        return None
+    summary = match.group(1).strip()
+    return summary or None
+
+
+def format_file_references(files: list[str]) -> str:
+    """Format file references with metadata (size, modified time)."""
+    if not files:
+        return ""
+
+    references = []
+    for file_path in files:
+        try:
+            path = Path(file_path)
+            stat = path.stat()
+            modified = datetime.fromtimestamp(stat.st_mtime, tz=timezone.utc).isoformat()
+            size = stat.st_size
+            references.append(f"- {file_path} (last modified {modified}, {size} bytes)")
+        except OSError:
+            references.append(f"- {file_path} (unavailable)")
+    return "\n".join(references)
+
+
+def apply_output_limit(content: str, cli_name: str) -> tuple[str, dict]:
+    """
+    Apply output size limit with summary extraction.
+
+    Returns:
+        Tuple of (processed_content, metadata_dict)
+    """
+    metadata = {}
+
+    if len(content) <= MAX_RESPONSE_CHARS:
+        return content, metadata
+
+    # Try to extract summary
+    summary = extract_summary(content)
+    if summary:
+        if len(summary) <= MAX_RESPONSE_CHARS:
+            metadata.update(
+                {
+                    "output_summarized": True,
+                    "output_original_length": len(content),
+                    "output_summary_length": len(summary),
+                    "output_limit": MAX_RESPONSE_CHARS,
+                }
+            )
+            return summary, metadata
+        # Summary too long, truncate it
+        summary = summary[:MAX_RESPONSE_CHARS]
+        metadata.update(
+            {
+                "output_summarized": True,
+                "output_truncated": True,
+                "output_original_length": len(content),
+                "output_limit": MAX_RESPONSE_CHARS,
+            }
+        )
+        return summary, metadata
+
+    # No summary, truncate with excerpt
+    excerpt_limit = min(4000, MAX_RESPONSE_CHARS // 2)
+    excerpt = content[:excerpt_limit]
+    metadata.update(
+        {
+            "output_truncated": True,
+            "output_original_length": len(content),
+            "output_excerpt_length": len(excerpt),
+            "output_limit": MAX_RESPONSE_CHARS,
+        }
+    )
+
+    message = (
+        f"CLI '{cli_name}' produced {len(content)} characters, exceeding the limit "
+        f"({MAX_RESPONSE_CHARS} characters). Please narrow the request or run the CLI directly.\n\n"
+        f"--- Begin excerpt ({len(excerpt)} of {len(content)} chars) ---\n{excerpt}\n--- End excerpt ---"
+    )
+    return message, metadata
 
 
 def main():
@@ -82,9 +174,6 @@ def main():
     args = parser.parse_args()
 
     try:
-        # Load configuration
-        config = load_config()
-
         # Load CLI client configuration
         try:
             client = load_cli_client(args.cli)
@@ -124,6 +213,13 @@ def main():
         full_prompt_parts.append("=== USER REQUEST ===")
         full_prompt_parts.append(args.prompt)
 
+        # Add file references with metadata
+        if args.files:
+            file_refs = format_file_references(args.files)
+            if file_refs:
+                full_prompt_parts.append("=== FILE REFERENCES ===")
+                full_prompt_parts.append(file_refs)
+
         full_prompt = "\n\n".join(full_prompt_parts)
 
         # Build command
@@ -131,15 +227,8 @@ def main():
         cmd.extend(client.get("additional_args", []))
         cmd.extend(role.get("role_args", []))
 
-        # Add files if provided
-        for file_path in args.files:
-            # Different CLIs have different file argument formats
-            if args.cli == "claude":
-                cmd.extend(["--add-file", file_path])
-            elif args.cli == "gemini":
-                cmd.extend(["--file", file_path])
-            else:
-                cmd.extend(["--file", file_path])
+        # NOTE: Files are embedded as references in the prompt (format_file_references)
+        # matching the original MCP clink architecture. CLIs don't receive --file args.
 
         # Add prompt (different CLIs have different prompt formats)
         if args.cli == "claude":
@@ -163,38 +252,74 @@ def main():
                 env=env,
             )
 
-            output = {
-                "status": "success" if result.returncode == 0 else "error",
-                "content": result.stdout,
-                "stderr": result.stderr if result.stderr else None,
-                "return_code": result.returncode,
-                "cli": args.cli,
-                "role": args.role,
-            }
+            # Apply output limit with summary extraction
+            content = result.stdout
+            limit_metadata = {}
+            if content:
+                content, limit_metadata = apply_output_limit(content, args.cli)
+
+            # Build agentic result
+            output = build_agentic_response(
+                tool_name="clink",
+                status="success" if result.returncode == 0 else "error",
+                content=content,
+                continuation_id="",  # Clink doesn't use continuation
+                model=f"CLI: {args.cli}",
+                provider=args.cli,
+                confidence="medium",  # CLI responses have medium confidence
+            )
+            output["cli"] = args.cli
+            output["role"] = args.role
+            output["return_code"] = result.returncode
+            if result.stderr:
+                output["stderr"] = result.stderr
+
+            # Add limit metadata if output was modified
+            if limit_metadata:
+                output.update(limit_metadata)
 
         except subprocess.TimeoutExpired:
-            output = {
-                "status": "error",
-                "error": f"CLI '{args.cli}' timed out after {args.timeout} seconds",
-                "cli": args.cli,
-                "role": args.role,
-            }
+            output = build_agentic_response(
+                tool_name="clink",
+                status="error",
+                content=f"CLI '{args.cli}' timed out after {args.timeout} seconds",
+                continuation_id="",
+                model=f"CLI: {args.cli}",
+                provider=args.cli,
+                confidence="certain",  # Timeout is a certain error
+            )
+            output["cli"] = args.cli
+            output["role"] = args.role
+            output["error"] = f"CLI '{args.cli}' timed out after {args.timeout} seconds"
 
         except FileNotFoundError:
-            output = {
-                "status": "error",
-                "error": f"CLI '{args.cli}' not found. Is it installed and in PATH?",
-                "cli": args.cli,
-                "role": args.role,
-            }
+            output = build_agentic_response(
+                tool_name="clink",
+                status="error",
+                content=f"CLI '{args.cli}' not found. Is it installed and in PATH?",
+                continuation_id="",
+                model=f"CLI: {args.cli}",
+                provider=args.cli,
+                confidence="certain",  # File not found is a certain error
+            )
+            output["cli"] = args.cli
+            output["role"] = args.role
+            output["error"] = f"CLI '{args.cli}' not found. Is it installed and in PATH?"
 
         if args.json:
             print(json.dumps(output, indent=2))
         else:
-            print(f"\n{'='*60}")
+            print(f"\n{'=' * 60}")
             print(f"CLI: {args.cli} | Role: {args.role}")
             print(f"Status: {output['status']}")
-            print(f"{'='*60}\n")
+            print(f"Model: {output.get('model', 'N/A')}")
+            print(f"Provider: {output.get('provider', 'N/A')}")
+            if output.get("agentic"):
+                agentic = output["agentic"]
+                print(f"Confidence: {agentic.get('confidence', 'N/A')}")
+                if agentic.get("escalation_path"):
+                    print(f"Escalation: {agentic['escalation_path']}")
+            print(f"{'=' * 60}\n")
 
             if output.get("content"):
                 print(output["content"])
@@ -205,17 +330,33 @@ def main():
             if output.get("error"):
                 print(f"\nError: {output['error']}")
 
-            print(f"\n{'='*60}\n")
+            # Show agentic next actions
+            if output.get("agentic", {}).get("next_actions"):
+                print("\n--- SUGGESTED NEXT ACTIONS ---")
+                for action in output["agentic"]["next_actions"]:
+                    print(f"  - {action}")
+
+            # Show related tools
+            if output.get("agentic", {}).get("related_tools"):
+                print(f"\nRelated tools: {', '.join(output['agentic']['related_tools'])}")
+
+            print(f"\n{'=' * 60}\n")
 
         if output["status"] == "error":
             sys.exit(1)
 
     except Exception as e:
-        error_result = {
-            "status": "error",
-            "error": str(e),
-            "error_type": type(e).__name__,
-        }
+        error_result = build_agentic_response(
+            tool_name="clink",
+            status="error",
+            content=str(e),
+            continuation_id="",
+            model="",
+            provider="",
+            confidence="low",
+        )
+        error_result["error"] = str(e)
+        error_result["error_type"] = type(e).__name__
         if args.json:
             print(json.dumps(error_result, indent=2))
         else:

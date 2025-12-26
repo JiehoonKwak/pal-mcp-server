@@ -8,35 +8,104 @@ allowed-tools: [Read, Glob, Grep, Edit, Write, Bash, Task]
 
 PAL provides access to multiple AI models (Gemini, OpenAI, XAI, OpenRouter, Ollama) for specialized development tasks with conversation memory and cross-tool continuation.
 
-## Quick Start
+## Workflow Decision Tree
 
-```bash
-# Set your API key (at least one required)
-export GEMINI_API_KEY="your-key"
+### Quick Question or Brainstorming
+→ Use **Chat**: `uv run scripts/pal_chat.py --prompt "..." --json`
 
-# Or configure in config/config.yaml
+### Code Quality Review (before PR/commit)
+→ Use **CodeReview**: `uv run scripts/pal_codereview.py --files src/*.py --focus security`
+- If issues found → **Debug** → **TestGen** → **Precommit**
 
-# Run with uv (recommended - no install needed)
-uv run scripts/pal_chat.py --prompt "Hello, PAL!" --json
+### Bug Investigation
+→ Use **Debug**: `uv run scripts/pal_debug.py --issue "..." --files src/*.py`
+- After fix → **TestGen** → **Precommit**
 
-# Or install dependencies first
-pip install -r requirements.txt
-python scripts/pal_chat.py --prompt "Hello, PAL!" --json
+### Complex Architecture Decision
+→ Use **ThinkDeep**: `uv run scripts/pal_thinkdeep.py --prompt "..." --thinking-mode high`
+- Need multiple perspectives → **Consensus**
+
+### Security Audit
+→ Use **SecAudit**: `uv run scripts/pal_secaudit.py --files src/*.py --audit-type full`
+
+### Generate Tests / Documentation
+→ **TestGen** or **DocGen**: `uv run scripts/pal_testgen.py --files src/*.py`
+
+### Multi-Model Perspectives
+→ Use **Consensus**: `uv run scripts/pal_consensus.py --proposal "..." --models gemini-2.5-flash gpt-4o`
+
+### Spawn External CLI
+→ Use **Clink**: `uv run scripts/pal_clink.py --cli gemini --role planner`
+
+## Agentic Orchestration
+
+**MANDATORY - READ**: For complex multi-tool workflows, read [`workflows/agentic-orchestration.md`](workflows/agentic-orchestration.md) for confidence-based routing and escalation patterns.
+
+All PAL tools return rich metadata enabling Claude to orchestrate multi-tool workflows:
+
+```json
+{
+  "status": "success",
+  "content": "Response text",
+  "continuation_id": "uuid-for-continuation",
+  "agentic": {
+    "confidence": "low|medium|high|certain",
+    "next_actions": ["Suggested action 1", "Action 2"],
+    "related_tools": ["tool1", "tool2"],
+    "escalation_path": "tool1 → tool2 → tool3"
+  }
+}
+```
+
+### Confidence-Based Decision Making
+
+| Confidence | Meaning | Claude Action |
+|------------|---------|---------------|
+| **certain** | Complete, verified answer | Proceed with implementation |
+| **high** | Strong analysis, minor gaps | Proceed, verify critical details |
+| **medium** | Reasonable analysis, needs validation | Consider escalation or more context |
+| **low** | Uncertain, needs more data | Escalate to related_tools or gather more files |
+
+### Escalation Patterns
+
+```
+chat (quick question)
+  ↓ [needs deep analysis]
+thinkdeep (complex reasoning)
+  ↓ [needs code review]
+codereview (quality issues)
+  ↓ [bug found]
+debug (root cause)
+  ↓ [fix verified]
+testgen (regression tests)
+  ↓ [all pass]
+precommit (validation)
+  ↓ [ready]
+commit
 ```
 
 ## When to Use Each Tool
 
 Choose the right tool for your task:
 
-| Task | Tool | Why |
-|------|------|-----|
-| Simple questions, brainstorming | **Chat** | Fast responses, general discussion |
-| Complex architecture decisions | **ThinkDeep** | Extended reasoning with high thinking budget |
-| Code quality before PR/commit | **CodeReview** | Structured review with severity ratings |
-| Bug investigation | **Debug** | Systematic debugging with hypothesis generation |
-| Strategic technical audit | **Analyze** | High-level architecture and scalability analysis |
-| Multiple perspectives needed | **Consensus** | Consult 2+ models with optional stance steering |
-| Leverage other CLI tools | **Clink** | Bridge to Gemini/Claude/Codex CLIs |
+| Task | Tool | Confidence | Escalation Path |
+|------|------|-----------|-----------------|
+| Simple questions, brainstorming | **Chat** | medium | → codereview → thinkdeep |
+| Complex architecture decisions | **ThinkDeep** | high | → planner → implement |
+| Code quality before PR/commit | **CodeReview** | high | → debug → testgen → precommit |
+| Bug investigation | **Debug** | medium | → testgen → codereview |
+| Strategic technical audit | **Analyze** | medium | → codereview → refactor |
+| Multiple perspectives needed | **Consensus** | high | → thinkdeep → planner |
+| Leverage other CLI tools | **Clink** | medium | varies |
+| Security vulnerabilities | **SecAudit** | high | → fix → testgen → precommit |
+| Generate tests | **TestGen** | high | → run tests → precommit |
+| Generate documentation | **DocGen** | high | → review |
+| Refactoring suggestions | **Refactor** | medium | → codereview → testgen |
+| Pre-commit validation | **Precommit** | high | → fix → commit |
+| Call path analysis | **Tracer** | medium | → debug → fix |
+| Challenge assumptions | **Challenge** | high | - |
+| API documentation | **APILookup** | medium | - |
+| List available models | **ListModels** | certain | - |
 
 ### Detailed Use Cases
 
@@ -315,6 +384,14 @@ When `model: auto`, PAL selects the best available model:
 │   ├── consensus.md
 │   ├── debug.md
 │   ├── analyze.md
+│   ├── secaudit.md
+│   ├── testgen.md
+│   ├── docgen.md
+│   ├── refactor.md
+│   ├── precommit.md
+│   ├── tracer.md
+│   ├── challenge.md
+│   ├── apilookup.md
 │   └── clink/
 ├── scripts/                    # Executable tools
 │   ├── pal_chat.py
@@ -324,9 +401,32 @@ When `model: auto`, PAL selects the best available model:
 │   ├── pal_debug.py
 │   ├── pal_analyze.py
 │   ├── pal_clink.py
+│   ├── pal_planner.py
+│   ├── pal_secaudit.py
+│   ├── pal_testgen.py
+│   ├── pal_docgen.py
+│   ├── pal_refactor.py
+│   ├── pal_precommit.py
+│   ├── pal_tracer.py
+│   ├── pal_challenge.py
+│   ├── pal_apilookup.py
+│   ├── pal_listmodels.py
 │   └── lib/                    # Shared libraries
-├── examples/
-│   └── workflows.md
+│       ├── config.py
+│       ├── providers.py
+│       ├── conversation.py
+│       ├── workflow.py
+│       └── agentic.py          # Agentic response builder
+├── workflows/                  # Workflow documentation
+│   ├── README.md               # Agentic architecture overview
+│   ├── tool-reference.md       # Quick tool reference
+│   ├── patterns/               # Orchestration patterns
+│   │   ├── escalation.md
+│   │   ├── chaining.md
+│   │   └── continuation.md
+│   └── examples/               # Workflow examples
+│       ├── bug-investigation.md
+│       └── security-audit.md
 └── requirements.txt
 ```
 

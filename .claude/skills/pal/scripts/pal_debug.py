@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+#!/usr/bin/env -S uv run
 # /// script
 # requires-python = ">=3.11"
 # dependencies = [
@@ -49,12 +49,24 @@ from pathlib import Path
 # Add lib to path
 sys.path.insert(0, str(Path(__file__).parent / "lib"))
 
+from agentic import build_agentic_response, infer_confidence  # noqa: E402
 from conversation import ConversationMemory
 from file_utils import read_files
 from workflow import DebugWorkflow, DebugWorkflowRequest
 
 from config import load_config
 from providers import execute_request, get_provider
+
+# Confidence mapping from workflow levels to agentic levels
+CONFIDENCE_MAP = {
+    "exploring": "low",
+    "low": "low",
+    "medium": "medium",
+    "high": "high",
+    "very_high": "high",
+    "almost_certain": "certain",
+    "certain": "certain",
+}
 
 
 def load_prompt(prompt_name: str) -> str:
@@ -151,33 +163,73 @@ def main():
 
             # Check if we should skip expert analysis (certain confidence)
             if args.confidence == "certain" and not args.next_step_required:
-                result = {
-                    "status": "certain_confidence_proceed_with_fix",
-                    "message": "Investigation complete with CERTAIN confidence. Proceed with fix.",
-                    "continuation_id": thread["thread_id"],
-                    "investigation": {
-                        "findings": workflow.consolidated_findings.findings,
-                        "files_checked": list(workflow.consolidated_findings.files_checked),
-                        "relevant_files": list(workflow.consolidated_findings.relevant_files),
-                        "hypothesis": args.hypothesis,
-                        "confidence": args.confidence,
-                    },
+                agentic_confidence = CONFIDENCE_MAP.get(args.confidence, "medium")
+                findings_summary = f"Root cause identified: {args.hypothesis}"
+
+                result = build_agentic_response(
+                    tool_name="debug",
+                    status="success",
+                    content="Investigation complete with CERTAIN confidence. Proceed with fix.",
+                    continuation_id=thread["thread_id"],
+                    confidence=agentic_confidence,
+                    files_examined=args.files,
+                    findings_summary=findings_summary,
+                    additional_next_actions=[
+                        f"Implement fix for: {args.hypothesis}",
+                        "Run tests to verify the fix",
+                    ],
+                )
+
+                # Add investigation details
+                result["investigation"] = {
+                    "findings": workflow.consolidated_findings.findings,
+                    "files_checked": list(workflow.consolidated_findings.files_checked),
+                    "relevant_files": list(workflow.consolidated_findings.relevant_files),
+                    "hypothesis": args.hypothesis,
+                    "confidence": args.confidence,
                 }
 
                 if args.json:
                     print(json.dumps(result, indent=2))
                 else:
-                    print(f"\n{'='*60}")
+                    agentic = result.get("agentic", {})
+                    print(f"\n{'=' * 60}")
                     print("Investigation Complete - CERTAIN Confidence")
                     print(f"Hypothesis: {args.hypothesis}")
-                    print(f"{'='*60}\n")
+                    print(f"{'=' * 60}")
+                    print(f"\nConfidence: {agentic.get('confidence', 'N/A')}")
+                    if agentic.get("next_actions"):
+                        print("\nNext Actions:")
+                        for action in agentic["next_actions"]:
+                            print(f"  - {action}")
+                    if agentic.get("related_tools"):
+                        print(f"\nRelated Tools: {', '.join(agentic['related_tools'])}")
+                    print(f"\n{'=' * 60}")
                     print("Proceed with implementing the fix.")
                 return
 
             # Get step guidance if more steps needed
             if args.next_step_required:
                 guidance = workflow.get_step_guidance(workflow_request)
-                result = workflow.format_step_response(
+                agentic_confidence = CONFIDENCE_MAP.get(args.confidence, "medium")
+                findings_summary = f"Step {args.step_number}: {args.step}"
+
+                result = build_agentic_response(
+                    tool_name="debug",
+                    status="continue_investigation",
+                    content=guidance,
+                    continuation_id=thread["thread_id"],
+                    confidence=agentic_confidence,
+                    files_examined=args.files,
+                    findings_summary=findings_summary,
+                    additional_next_actions=[
+                        f"Execute step {args.step_number + 1} of investigation",
+                        f"Current hypothesis: {args.hypothesis or 'Still exploring'}",
+                    ],
+                )
+
+                # Add step response details
+                step_response = workflow.format_step_response(
                     workflow_request,
                     {
                         "guidance": guidance,
@@ -187,16 +239,25 @@ def main():
                         "current_confidence": args.confidence,
                     },
                 )
+                result["step_response"] = step_response
 
                 if args.json:
                     print(json.dumps(result, indent=2))
                 else:
-                    print(f"\n{'='*60}")
+                    agentic = result.get("agentic", {})
+                    print(f"\n{'=' * 60}")
                     print(f"Debug Investigation - Step {args.step_number}/{args.total_steps}")
-                    print(f"Confidence: {args.confidence}")
-                    print(f"{'='*60}\n")
+                    print(f"Confidence: {agentic.get('confidence', 'N/A')} (workflow: {args.confidence})")
+                    print(f"{'=' * 60}\n")
                     print(guidance)
-                    print(f"\n{'='*60}\n")
+                    print(f"\n{'=' * 60}")
+                    if agentic.get("next_actions"):
+                        print("\nNext Actions:")
+                        for action in agentic["next_actions"]:
+                            print(f"  - {action}")
+                    if agentic.get("related_tools"):
+                        print(f"\nRelated Tools: {', '.join(agentic['related_tools'])}")
+                    print(f"\n{'=' * 60}\n")
                 return
 
         # Load system prompt
@@ -256,6 +317,7 @@ def main():
             system_prompt=system_prompt,
             temperature=0.5,  # Lower temperature for precise analysis
             thinking_mode=args.thinking_mode,
+            config=config,
         )
 
         # Record turns
@@ -276,34 +338,65 @@ def main():
             model_provider=provider.provider_name,
         )
 
-        # Build result
-        result = {
-            "status": "success",
-            "content": response["content"],
-            "continuation_id": thread["thread_id"],
-            "issue": args.issue,
-            "files_analyzed": args.files,
-            "model": resolved_model,
-            "provider": provider.provider_name,
-            "usage": response.get("usage", {}),
-        }
+        # Infer confidence from response content
+        inferred_confidence = infer_confidence(
+            response["content"],
+            has_errors=False,
+            has_warnings=False,
+            has_actionable_items=True,
+        )
+
+        # If in workflow mode, use mapped confidence instead
+        if is_workflow_mode:
+            agentic_confidence = CONFIDENCE_MAP.get(args.confidence, "medium")
+        else:
+            agentic_confidence = inferred_confidence
+
+        # Build agentic result
+        result = build_agentic_response(
+            tool_name="debug",
+            status="success",
+            content=response["content"],
+            continuation_id=thread["thread_id"],
+            model=resolved_model,
+            provider=provider.provider_name,
+            usage=response.get("usage", {}),
+            confidence=agentic_confidence,
+            files_examined=args.files,
+            findings_summary=f"Debug analysis for: {args.issue}",
+        )
+
+        # Add additional metadata
+        result["issue"] = args.issue
+        result["files_analyzed"] = args.files
 
         if args.json:
             print(json.dumps(result, indent=2))
         else:
-            print(f"\n{'='*60}")
+            agentic = result.get("agentic", {})
+            print(f"\n{'=' * 60}")
             print("Debug Analysis")
             print(f"Issue: {args.issue}")
             print(f"Files: {', '.join(args.files)}")
             print(f"Model: {resolved_model} via {provider.provider_name}")
             print(f"Continuation ID: {thread['thread_id']}")
-            print(f"{'='*60}\n")
+            print(f"Confidence: {agentic.get('confidence', 'N/A')}")
+            print(f"{'=' * 60}\n")
             print(response["content"])
-            print(f"\n{'='*60}")
+            print(f"\n{'=' * 60}")
+            if agentic.get("next_actions"):
+                print("\nNext Actions:")
+                for action in agentic["next_actions"]:
+                    print(f"  - {action}")
+            if agentic.get("related_tools"):
+                print(f"\nRelated Tools: {', '.join(agentic['related_tools'])}")
+            if agentic.get("escalation_path"):
+                print(f"Escalation Path: {agentic['escalation_path']}")
+            print(f"\n{'=' * 60}")
             if response.get("usage"):
                 usage = response["usage"]
-                print(f"Tokens: {usage.get('input_tokens', 'N/A')} in / " f"{usage.get('output_tokens', 'N/A')} out")
-            print(f"{'='*60}\n")
+                print(f"Tokens: {usage.get('input_tokens', 'N/A')} in / {usage.get('output_tokens', 'N/A')} out")
+            print(f"{'=' * 60}\n")
 
     except Exception as e:
         error_result = {

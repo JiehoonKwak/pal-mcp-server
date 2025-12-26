@@ -5,6 +5,7 @@ Provides multi-turn conversation persistence with:
 - UUID-based threading
 - Cross-tool continuation
 - Newest-first file deduplication
+- Token-aware history building
 - SQLite or in-memory storage
 """
 
@@ -14,6 +15,56 @@ import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
+
+# Model context window sizes (tokens)
+MODEL_CONTEXT_WINDOWS = {
+    # Gemini
+    "gemini-2.5-flash": 1_000_000,
+    "gemini-2.5-pro": 1_000_000,
+    "gemini-2.0-flash": 1_000_000,
+    "gemini-2.0-flash-thinking-exp": 1_000_000,
+    # OpenAI
+    "gpt-4o": 128_000,
+    "gpt-4o-mini": 128_000,
+    "gpt-4-turbo": 128_000,
+    "o1": 128_000,
+    "o1-mini": 128_000,
+    "o3-mini": 200_000,
+    # X.AI
+    "grok-3": 128_000,
+    "grok-3-mini": 128_000,
+    "grok-2": 128_000,
+    # OpenRouter models (via prefix matching)
+    "anthropic/claude": 200_000,
+    "meta-llama/llama": 128_000,
+    # Default for unknown models
+    "_default": 32_000,
+}
+
+
+def estimate_tokens(text: str) -> int:
+    """Estimate token count from text (simple char/4 heuristic)."""
+    if not text:
+        return 0
+    return len(text) // 4
+
+
+def get_context_window(model_name: str) -> int:
+    """Get context window size for a model."""
+    if not model_name:
+        return MODEL_CONTEXT_WINDOWS["_default"]
+
+    # Direct match
+    if model_name in MODEL_CONTEXT_WINDOWS:
+        return MODEL_CONTEXT_WINDOWS[model_name]
+
+    # Prefix match for OpenRouter models
+    model_lower = model_name.lower()
+    for prefix, window in MODEL_CONTEXT_WINDOWS.items():
+        if prefix != "_default" and model_lower.startswith(prefix):
+            return window
+
+    return MODEL_CONTEXT_WINDOWS["_default"]
 
 
 class InMemoryStorage:
@@ -231,15 +282,161 @@ class ConversationMemory:
         self.storage.set(thread_id, thread, ttl=self.timeout_seconds)
         return True
 
+    def calculate_token_allocation(self, model_name: str) -> dict:
+        """
+        Calculate token allocation for a model.
+
+        Uses model-specific context windows with standard allocation:
+        - 60% for content (history + files)
+        - 40% for response
+        - Within content: 50% history, 50% files
+
+        Args:
+            model_name: Model identifier
+
+        Returns:
+            Dict with total_tokens, content_tokens, response_tokens, history_tokens
+        """
+        total = get_context_window(model_name)
+
+        # Larger models can afford more content
+        if total >= 500_000:
+            content_pct = 0.75
+        elif total >= 100_000:
+            content_pct = 0.65
+        else:
+            content_pct = 0.60
+
+        content_tokens = int(total * content_pct)
+        response_tokens = total - content_tokens
+        history_tokens = content_tokens // 2
+
+        return {
+            "total_tokens": total,
+            "content_tokens": content_tokens,
+            "response_tokens": response_tokens,
+            "history_tokens": history_tokens,
+        }
+
+    def build_history_with_budget(self, thread: dict, model_name: str = "") -> tuple[str, int]:
+        """
+        Build conversation history with token budget awareness.
+
+        Uses newest-first turn collection, then presents chronologically.
+        Stops adding turns when budget exhausted.
+
+        Args:
+            thread: Thread dictionary
+            model_name: Model to calculate budget for
+
+        Returns:
+            Tuple of (formatted_history, tokens_used)
+        """
+        if not thread or not thread.get("turns"):
+            return "", 0
+
+        allocation = self.calculate_token_allocation(model_name)
+        max_tokens = allocation["history_tokens"]
+
+        turns = thread["turns"]
+
+        # Collect files with newest-first deduplication
+        seen_files = set()
+        all_files = []
+        for turn in reversed(turns):
+            for f in turn.get("files") or []:
+                if f not in seen_files:
+                    seen_files.add(f)
+                    all_files.append(f)
+
+        # Build header
+        header_parts = [
+            "=== CONVERSATION HISTORY (CONTINUATION) ===",
+            f"Thread: {thread['thread_id']}",
+            f"Tool: {thread['tool_name']}",
+            f"Turn {len(turns)}/{self.max_turns}",
+            "You are continuing this conversation thread from where it left off.",
+            "",
+        ]
+        if all_files:
+            header_parts.append("Files referenced in this conversation:")
+            for f in all_files:
+                header_parts.append(f"  - {f}")
+            header_parts.append("")
+        header_parts.append("Previous conversation turns:")
+        header = "\n".join(header_parts)
+
+        # Build footer
+        footer_parts = [
+            "",
+            "=== END CONVERSATION HISTORY ===",
+            "",
+            "IMPORTANT: You are continuing an existing conversation thread.",
+            "Build upon the previous exchanges shown above.",
+            "DO NOT repeat or summarize previous analysis - provide only new insights.",
+            f"This is turn {len(turns) + 1} of the conversation.",
+        ]
+        footer = "\n".join(footer_parts)
+
+        # Reserve tokens for header + footer
+        header_tokens = estimate_tokens(header)
+        footer_tokens = estimate_tokens(footer)
+        available_tokens = max_tokens - header_tokens - footer_tokens
+
+        if available_tokens <= 0:
+            # Not enough budget for any turns
+            return header + footer, header_tokens + footer_tokens
+
+        # Collect turns newest-first (for priority), then reverse for presentation
+        turn_entries = []
+        tokens_used = 0
+
+        for idx in range(len(turns) - 1, -1, -1):
+            turn = turns[idx]
+            role_label = "Agent" if turn["role"] == "user" else (turn.get("model_name") or "Assistant")
+
+            turn_header = f"\n--- Turn {idx + 1} ({role_label}"
+            if turn.get("tool_name"):
+                turn_header += f" using {turn['tool_name']}"
+            if turn.get("model_provider"):
+                turn_header += f" via {turn['model_provider']}"
+            turn_header += ") ---"
+
+            turn_content = turn_header
+            if turn.get("files"):
+                turn_content += f"\nFiles: {', '.join(turn['files'])}"
+            turn_content += f"\n{turn['content']}"
+
+            turn_tokens = estimate_tokens(turn_content)
+            if tokens_used + turn_tokens > available_tokens:
+                break  # Budget exhausted, older turns excluded
+
+            turn_entries.append((idx, turn_content))
+            tokens_used += turn_tokens
+
+        # Reverse to chronological order for presentation
+        turn_entries.reverse()
+
+        # Assemble final history
+        history_parts = [header]
+        for _, content in turn_entries:
+            history_parts.append(content)
+        history_parts.append(footer)
+
+        total_history = "\n".join(history_parts)
+        total_tokens = header_tokens + tokens_used + footer_tokens
+
+        return total_history, total_tokens
+
     def build_history(self, thread: dict, max_tokens: int = 100000) -> str:
         """
-        Build formatted conversation history.
+        Build formatted conversation history (legacy method).
 
         Uses newest-first prioritization for files and token-aware turn selection.
 
         Args:
             thread: Thread dictionary
-            max_tokens: Maximum tokens for history
+            max_tokens: Maximum tokens for history (ignored, use build_history_with_budget)
 
         Returns:
             Formatted conversation history string

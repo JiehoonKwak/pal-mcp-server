@@ -8,30 +8,31 @@
 # ]
 # ///
 """
-PAL CodeReview - Comprehensive code review with external AI models.
+PAL DocGen - Documentation generation with external AI models.
 
 Run with uv (recommended):
-    uv run scripts/pal_codereview.py --files FILE [FILE ...] [options]
+    uv run scripts/pal_docgen.py --files FILE [FILE ...] [options]
 
 Usage:
-    python pal_codereview.py --files FILE [FILE ...] [options]
+    python pal_docgen.py --files FILE [FILE ...] [options]
 
 Options:
-    --files FILE [FILE ...]    Files to review (required)
-    --prompt PROMPT            Additional review instructions
-    --focus AREA [AREA ...]    Focus areas (security, performance, etc.)
+    --files FILE [FILE ...]    Files to document (required)
+    --format FORMAT            Output format (markdown, docstring, jsdoc)
+    --include-complexity       Include Big O analysis (default: true)
     --model MODEL              Model to use (default: from config)
-    --continuation-id ID       Continue existing review conversation
+    --continuation-id ID       Continue existing conversation
+    --json                     Output as JSON
 
 Examples:
-    # Basic code review
-    python pal_codereview.py --files src/main.py
+    # Generate docstrings for Python files
+    python pal_docgen.py --files src/main.py
 
-    # Review with focus
-    python pal_codereview.py --files src/auth.py --focus security
+    # Generate JSDoc for JavaScript
+    python pal_docgen.py --files src/utils.js --format jsdoc
 
-    # Review multiple files
-    python pal_codereview.py --files src/*.py --focus performance maintainability
+    # Generate markdown documentation
+    python pal_docgen.py --files src/*.py --format markdown
 """
 
 import argparse
@@ -42,7 +43,7 @@ from pathlib import Path
 # Add lib to path
 sys.path.insert(0, str(Path(__file__).parent / "lib"))
 
-from agentic import build_agentic_response, infer_confidence  # noqa: E402
+from agentic import build_agentic_response  # noqa: E402
 from conversation import ConversationMemory
 from file_utils import read_files
 
@@ -59,22 +60,33 @@ def load_prompt(prompt_name: str) -> str:
 
 
 def main():
-    parser = argparse.ArgumentParser(description="PAL CodeReview - Comprehensive code review with external AI models")
-    parser.add_argument("--files", nargs="+", required=True, help="Files to review")
-    parser.add_argument("--prompt", help="Additional review instructions")
+    parser = argparse.ArgumentParser(description="PAL DocGen - Documentation generation with external AI models")
+    parser.add_argument("--files", nargs="+", required=True, help="Files to document")
     parser.add_argument(
-        "--focus",
-        nargs="*",
-        default=[],
-        choices=["security", "performance", "maintainability", "architecture", "testing"],
-        help="Focus areas for the review",
+        "--format",
+        choices=["markdown", "docstring", "jsdoc"],
+        default="docstring",
+        help="Output format (default: docstring)",
+    )
+    parser.add_argument(
+        "--include-complexity",
+        action="store_true",
+        default=True,
+        help="Include Big O analysis (default: true)",
+    )
+    parser.add_argument(
+        "--no-complexity",
+        action="store_true",
+        help="Exclude Big O analysis",
     )
     parser.add_argument("--model", help="Model to use (default: from config)")
     parser.add_argument("--continuation-id", help="Continue existing conversation")
-    parser.add_argument("--thinking-mode", choices=["minimal", "low", "medium", "high", "max"])
     parser.add_argument("--json", action="store_true", help="Output as JSON")
 
     args = parser.parse_args()
+
+    # Handle --no-complexity flag
+    include_complexity = not args.no_complexity
 
     try:
         # Load configuration
@@ -90,18 +102,18 @@ def main():
             if thread:
                 conversation_history = memory.build_history(thread)
             else:
-                thread = memory.create_thread("codereview", {"files": args.files})
+                thread = memory.create_thread("docgen", {"files": args.files})
         else:
-            thread = memory.create_thread("codereview", {"files": args.files})
+            thread = memory.create_thread("docgen", {"files": args.files})
 
         # Load system prompt
-        system_prompt = load_prompt("codereview")
+        system_prompt = load_prompt("docgen")
 
         # Read files
         file_content = read_files(args.files, include_line_numbers=True)
 
         if not file_content.strip():
-            raise ValueError("No valid files found to review")
+            raise ValueError("No valid files found to document")
 
         # Build user prompt
         user_prompt_parts = []
@@ -109,24 +121,30 @@ def main():
         if conversation_history:
             user_prompt_parts.append(conversation_history)
 
-        user_prompt_parts.append("=== CODE TO REVIEW ===")
+        user_prompt_parts.append("=== CODE TO DOCUMENT ===")
         user_prompt_parts.append(file_content)
 
-        # Add focus areas
-        if args.focus:
-            user_prompt_parts.append("\n=== FOCUS AREAS ===")
-            user_prompt_parts.append(f"Please focus on: {', '.join(args.focus)}")
+        # Add format instructions
+        user_prompt_parts.append("\n=== OUTPUT FORMAT ===")
+        format_instructions = {
+            "markdown": "Generate comprehensive markdown documentation suitable for README or API docs.",
+            "docstring": "Add inline docstrings/comments using language-appropriate conventions (Google-style for Python, JSDoc for JS/TS).",
+            "jsdoc": "Generate JSDoc-style documentation blocks.",
+        }
+        user_prompt_parts.append(format_instructions[args.format])
 
-        # Add custom prompt
-        if args.prompt:
-            user_prompt_parts.append("\n=== ADDITIONAL INSTRUCTIONS ===")
-            user_prompt_parts.append(args.prompt)
+        # Add complexity analysis instruction
+        if include_complexity:
+            user_prompt_parts.append("\n=== COMPLEXITY ANALYSIS ===")
+            user_prompt_parts.append(
+                "Include Big O time and space complexity analysis for each function/method. "
+                "Explain the reasoning behind each complexity assessment."
+            )
 
-        user_prompt_parts.append("\n=== REVIEW REQUEST ===")
+        user_prompt_parts.append("\n=== DOCUMENTATION REQUEST ===")
         user_prompt_parts.append(
-            "Please review the code above following the guidelines in your system prompt. "
-            "Identify issues by severity (Critical > High > Medium > Low) and provide "
-            "actionable fixes with specific line references."
+            "Please generate comprehensive documentation for the code above following the guidelines in your system prompt. "
+            "Ensure all parameters, return values, and exceptions are documented clearly."
         )
 
         full_user_prompt = "\n\n".join(user_prompt_parts)
@@ -135,19 +153,13 @@ def main():
         model = args.model or config.get("defaults", {}).get("model", "auto")
         provider, resolved_model = get_provider(model, config)
 
-        # Get thinking mode
-        thinking_mode = args.thinking_mode
-        if thinking_mode is None:
-            thinking_mode = config.get("defaults", {}).get("thinking_mode", "medium")
-
         # Execute request
         response = execute_request(
             provider=provider,
             prompt=full_user_prompt,
             model=resolved_model,
             system_prompt=system_prompt,
-            temperature=0.7,  # Lower temperature for precise analysis
-            thinking_mode=thinking_mode,
+            temperature=0.5,  # Lower temperature for consistent documentation
             config=config,
         )
 
@@ -155,38 +167,30 @@ def main():
         memory.add_turn(
             thread_id=thread["thread_id"],
             role="user",
-            content=f"Review files: {', '.join(args.files)}" + (f"\n{args.prompt}" if args.prompt else ""),
+            content=f"Document files: {', '.join(args.files)} (format: {args.format})",
             files=args.files,
-            tool_name="codereview",
+            tool_name="docgen",
         )
 
         memory.add_turn(
             thread_id=thread["thread_id"],
             role="assistant",
             content=response["content"],
-            tool_name="codereview",
+            tool_name="docgen",
             model_name=resolved_model,
             model_provider=provider.provider_name,
         )
 
-        # Infer confidence from response
-        confidence = infer_confidence(
-            response["content"],
-            has_errors=False,
-            has_warnings=True,
-            has_actionable_items=True,
-        )
-
-        # Build agentic result with rich metadata
+        # Build agentic result with high confidence (documentation is deterministic)
         result = build_agentic_response(
-            tool_name="codereview",
+            tool_name="docgen",
             status="success",
             content=response["content"],
             continuation_id=thread["thread_id"],
             model=resolved_model,
             provider=provider.provider_name,
             usage=response.get("usage", {}),
-            confidence=confidence,
+            confidence="high",
             files_examined=args.files,
         )
 
@@ -195,13 +199,12 @@ def main():
         else:
             # Human-readable output with agentic metadata
             print(f"\n{'=' * 60}")
-            print("Code Review")
+            print("Documentation Generated")
             print(f"Files: {', '.join(args.files)}")
-            if args.focus:
-                print(f"Focus: {', '.join(args.focus)}")
+            print(f"Format: {args.format}")
+            print(f"Complexity Analysis: {'included' if include_complexity else 'excluded'}")
             print(f"Model: {resolved_model} via {provider.provider_name}")
             print(f"Continuation ID: {thread['thread_id']}")
-            print(f"Confidence: {confidence}")
             print(f"{'=' * 60}\n")
             print(response["content"])
             print(f"\n{'=' * 60}")

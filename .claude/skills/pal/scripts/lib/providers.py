@@ -594,6 +594,66 @@ class CustomProvider(BaseProvider):
         }
 
 
+def is_model_allowed(model: str, provider_type: str, config: dict) -> bool:
+    """
+    Check if a model is allowed based on restrictions config.
+
+    Args:
+        model: Model name to check
+        provider_type: Provider type (google, openai, xai, openrouter)
+        config: Configuration dictionary
+
+    Returns:
+        True if allowed, False if restricted
+    """
+    restrictions = config.get("restrictions", {})
+    key = f"{provider_type}_allowed_models"
+    allowed_list = restrictions.get(key, [])
+
+    # Empty list = no restrictions (all allowed)
+    if not allowed_list:
+        return True
+
+    # Check if model matches any allowed pattern (case-insensitive, partial match)
+    model_lower = model.lower()
+    for allowed in allowed_list:
+        allowed_lower = allowed.lower().strip()
+        if allowed_lower in model_lower or model_lower in allowed_lower:
+            return True
+
+    return False
+
+
+def get_fallback_providers(config: dict) -> list[tuple[str, str, type]]:
+    """
+    Get ordered list of available providers for fallback.
+
+    Returns:
+        List of (api_key, default_model, ProviderClass) tuples in priority order
+    """
+    api_keys = config.get("api_keys", {})
+    providers = []
+
+    # Priority: OpenRouter > Gemini > OpenAI > XAI > Custom
+    openrouter_default = config.get("defaults", {}).get("openrouter_model", "google/gemini-2.5-flash")
+    if api_keys.get("openrouter") and is_model_allowed(openrouter_default, "openrouter", config):
+        providers.append((api_keys["openrouter"], openrouter_default, OpenRouterProvider))
+
+    if api_keys.get("gemini") and is_model_allowed("gemini-2.5-flash", "google", config):
+        providers.append((api_keys["gemini"], "gemini-2.5-flash", GeminiProvider))
+
+    if api_keys.get("openai") and is_model_allowed("gpt-4o", "openai", config):
+        providers.append((api_keys["openai"], "gpt-4o", OpenAIProvider))
+
+    if api_keys.get("xai") and is_model_allowed("grok-3", "xai", config):
+        providers.append((api_keys["xai"], "grok-3", XAIProvider))
+
+    if api_keys.get("custom_url"):
+        providers.append((api_keys["custom_url"], "llama3.2", CustomProvider))
+
+    return providers
+
+
 def get_provider(model: str, config: dict) -> tuple[BaseProvider, str]:
     """
     Get appropriate provider for a model.
@@ -604,54 +664,72 @@ def get_provider(model: str, config: dict) -> tuple[BaseProvider, str]:
 
     Returns:
         Tuple of (provider_instance, resolved_model_name)
+
+    Raises:
+        ValueError: If model is not allowed by restrictions
     """
     api_keys = config.get("api_keys", {})
 
     # Handle 'auto' mode
     if model.lower() == "auto":
-        # Priority: Gemini > OpenAI > XAI > OpenRouter > Custom
-        if api_keys.get("gemini"):
+        # Priority: OpenRouter > Gemini > OpenAI > XAI > Custom
+        # Respect restrictions when selecting auto model
+        openrouter_default = config.get("defaults", {}).get("openrouter_model", "google/gemini-2.5-flash")
+        if api_keys.get("openrouter") and is_model_allowed(openrouter_default, "openrouter", config):
+            return OpenRouterProvider(api_keys["openrouter"]), openrouter_default
+        elif api_keys.get("gemini") and is_model_allowed("gemini-2.5-flash", "google", config):
             return GeminiProvider(api_keys["gemini"]), "gemini-2.5-flash"
-        elif api_keys.get("openai"):
+        elif api_keys.get("openai") and is_model_allowed("gpt-4o", "openai", config):
             return OpenAIProvider(api_keys["openai"]), "gpt-4o"
-        elif api_keys.get("xai"):
+        elif api_keys.get("xai") and is_model_allowed("grok-3", "xai", config):
             return XAIProvider(api_keys["xai"]), "grok-3"
-        elif api_keys.get("openrouter"):
-            return OpenRouterProvider(api_keys["openrouter"]), "google/gemini-2.5-flash"
         elif api_keys.get("custom_url"):
             return CustomProvider(api_keys["custom_url"]), "llama3.2"
         else:
-            raise ValueError("No API keys configured. Set at least one provider API key.")
+            raise ValueError("No API keys configured or all models restricted.")
 
     # Route by model name
     model_lower = model.lower()
 
-    if "gemini" in model_lower:
-        key = api_keys.get("gemini") or os.environ.get("GEMINI_API_KEY")
+    # Check OpenRouter format first (provider/model)
+    if "/" in model:
+        if not is_model_allowed(model, "openrouter", config):
+            allowed = config.get("restrictions", {}).get("openrouter_allowed_models", [])
+            raise ValueError(f"Model '{model}' not in allowed list: {allowed}")
+        key = api_keys.get("openrouter") or os.environ.get("OPENROUTER_API_KEY")
         if not key:
-            raise ValueError("GEMINI_API_KEY not configured")
-        return GeminiProvider(key), model
+            raise ValueError("OPENROUTER_API_KEY not configured")
+        return OpenRouterProvider(key), model
 
     elif any(x in model_lower for x in ["gpt", "o1", "o3", "o4", "chatgpt"]):
+        if not is_model_allowed(model, "openai", config):
+            allowed = config.get("restrictions", {}).get("openai_allowed_models", [])
+            raise ValueError(f"Model '{model}' not in allowed list: {allowed}")
         key = api_keys.get("openai") or os.environ.get("OPENAI_API_KEY")
         if not key:
             raise ValueError("OPENAI_API_KEY not configured")
         return OpenAIProvider(key), model
 
     elif "grok" in model_lower:
+        if not is_model_allowed(model, "xai", config):
+            allowed = config.get("restrictions", {}).get("xai_allowed_models", [])
+            raise ValueError(f"Model '{model}' not in allowed list: {allowed}")
         key = api_keys.get("xai") or os.environ.get("XAI_API_KEY")
         if not key:
             raise ValueError("XAI_API_KEY not configured")
         return XAIProvider(key), model
 
-    elif "/" in model:  # OpenRouter format: provider/model
-        key = api_keys.get("openrouter") or os.environ.get("OPENROUTER_API_KEY")
+    elif "gemini" in model_lower:
+        if not is_model_allowed(model, "google", config):
+            allowed = config.get("restrictions", {}).get("google_allowed_models", [])
+            raise ValueError(f"Model '{model}' not in allowed list: {allowed}")
+        key = api_keys.get("gemini") or os.environ.get("GEMINI_API_KEY")
         if not key:
-            raise ValueError("OPENROUTER_API_KEY not configured")
-        return OpenRouterProvider(key), model
+            raise ValueError("GEMINI_API_KEY not configured")
+        return GeminiProvider(key), model
 
     else:
-        # Try custom/local
+        # Try custom/local (no restrictions for custom models)
         url = api_keys.get("custom_url") or os.environ.get("CUSTOM_API_URL")
         if url:
             return CustomProvider(url), model
@@ -668,10 +746,11 @@ def execute_request(
     thinking_mode: Optional[str] = None,
     images: Optional[list[str]] = None,
     max_retries: int = 4,
+    config: Optional[dict] = None,
     **kwargs,
 ) -> dict:
     """
-    Execute a request with retry logic.
+    Execute a request with retry logic and automatic provider fallback.
 
     Args:
         provider: Provider instance
@@ -681,7 +760,8 @@ def execute_request(
         temperature: Temperature
         thinking_mode: Thinking mode for supported models
         images: Optional images
-        max_retries: Maximum retry attempts
+        max_retries: Maximum retry attempts per provider
+        config: Configuration dict (enables automatic fallback to other providers)
 
     Returns:
         Response dictionary
@@ -689,6 +769,7 @@ def execute_request(
     delays = [1, 3, 5, 8]
     last_error = None
 
+    # Try primary provider
     for attempt in range(max_retries):
         try:
             return provider.generate(
@@ -705,5 +786,32 @@ def execute_request(
             if attempt < max_retries - 1:
                 delay = delays[min(attempt, len(delays) - 1)]
                 time.sleep(delay)
+
+    # If config provided, try fallback providers
+    if config:
+        fallback_providers = get_fallback_providers(config)
+        for api_key, fallback_model, ProviderClass in fallback_providers:
+            # Skip same provider type
+            if isinstance(provider, ProviderClass):
+                continue
+
+            try:
+                fallback_provider = ProviderClass(api_key)
+                result = fallback_provider.generate(
+                    prompt=prompt,
+                    model=fallback_model,
+                    system_prompt=system_prompt,
+                    temperature=temperature,
+                    thinking_mode=thinking_mode,
+                    images=images,
+                    **kwargs,
+                )
+                # Add fallback info to metadata
+                result["metadata"]["fallback"] = True
+                result["metadata"]["original_model"] = model
+                result["metadata"]["original_provider"] = provider.provider_name
+                return result
+            except Exception:
+                continue  # Try next fallback
 
     raise RuntimeError(f"Request failed after {max_retries} attempts: {last_error}")

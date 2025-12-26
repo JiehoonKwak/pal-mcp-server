@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+#!/usr/bin/env -S uv run
 # /// script
 # requires-python = ">=3.11"
 # dependencies = [
@@ -47,10 +47,12 @@ from pathlib import Path
 # Add lib to path
 sys.path.insert(0, str(Path(__file__).parent / "lib"))
 
-from config import load_config
-from conversation import ConversationMemory
-from file_utils import read_files
-from providers import execute_request, get_provider
+from agentic import build_agentic_response, infer_confidence  # noqa: E402
+from conversation import ConversationMemory  # noqa: E402
+from file_utils import read_files  # noqa: E402
+
+from config import load_config  # noqa: E402
+from providers import execute_request, get_provider  # noqa: E402
 
 
 def load_prompt(prompt_name: str) -> str:
@@ -62,9 +64,7 @@ def load_prompt(prompt_name: str) -> str:
 
 
 def main():
-    parser = argparse.ArgumentParser(
-        description="PAL Chat - Multi-turn conversational chat with external AI models"
-    )
+    parser = argparse.ArgumentParser(description="PAL Chat - Multi-turn conversational chat with external AI models")
     parser.add_argument("--prompt", required=True, help="User prompt")
     parser.add_argument("--files", nargs="*", default=[], help="Files to include as context")
     parser.add_argument("--images", nargs="*", default=[], help="Images to include")
@@ -88,12 +88,18 @@ def main():
         # Initialize conversation memory
         memory = ConversationMemory(config)
 
+        # Get model first for token budget calculation
+        model = args.model or config.get("defaults", {}).get("model", "auto")
+        provider, resolved_model = get_provider(model, config)
+
         # Get or create conversation thread
         conversation_history = ""
+        history_tokens = 0
         if args.continuation_id:
             thread = memory.get_thread(args.continuation_id)
             if thread:
-                conversation_history = memory.build_history(thread)
+                # Use token-aware history building
+                conversation_history, history_tokens = memory.build_history_with_budget(thread, resolved_model)
             else:
                 # Thread not found, create new one
                 thread = memory.create_thread("chat", {"prompt": args.prompt})
@@ -123,10 +129,6 @@ def main():
 
         full_user_prompt = "\n\n".join(user_prompt_parts)
 
-        # Get model and provider
-        model = args.model or config.get("defaults", {}).get("model", "auto")
-        provider, resolved_model = get_provider(model, config)
-
         # Get temperature and thinking mode
         temperature = args.temperature
         if temperature is None:
@@ -145,6 +147,7 @@ def main():
             temperature=temperature,
             thinking_mode=thinking_mode,
             images=args.images if args.images else None,
+            config=config,
         )
 
         # Record turns for continuation
@@ -166,33 +169,44 @@ def main():
             model_provider=provider.provider_name,
         )
 
-        # Build result
-        result = {
-            "status": "success",
-            "content": response["content"],
-            "continuation_id": thread["thread_id"],
-            "model": resolved_model,
-            "provider": provider.provider_name,
-            "usage": response.get("usage", {}),
-        }
+        # Infer confidence from response
+        confidence = infer_confidence(
+            response["content"],
+            has_errors=False,
+            has_warnings=False,
+            has_actionable_items=True,
+        )
+
+        # Build agentic result with rich metadata
+        result = build_agentic_response(
+            tool_name="chat",
+            status="success",
+            content=response["content"],
+            continuation_id=thread["thread_id"],
+            model=resolved_model,
+            provider=provider.provider_name,
+            usage=response.get("usage", {}),
+            confidence=confidence,
+            files_examined=args.files if args.files else [],
+        )
 
         if args.json:
             print(json.dumps(result, indent=2))
         else:
             # Human-readable output
-            print(f"\n{'='*60}")
+            print(f"\n{'=' * 60}")
             print(f"Model: {resolved_model} via {provider.provider_name}")
             print(f"Continuation ID: {thread['thread_id']}")
-            print(f"{'='*60}\n")
+            print(f"Confidence: {confidence}")
+            print(f"{'=' * 60}\n")
             print(response["content"])
-            print(f"\n{'='*60}")
+            print(f"\n{'=' * 60}")
             if response.get("usage"):
                 usage = response["usage"]
-                print(
-                    f"Tokens: {usage.get('input_tokens', 'N/A')} in / "
-                    f"{usage.get('output_tokens', 'N/A')} out"
-                )
-            print(f"{'='*60}\n")
+                print(f"Tokens: {usage.get('input_tokens', 'N/A')} in / {usage.get('output_tokens', 'N/A')} out")
+            print(f"\nNext actions: {', '.join(result['agentic']['next_actions'][:2])}")
+            print(f"Related tools: {', '.join(result['agentic']['related_tools'])}")
+            print(f"{'=' * 60}\n")
 
     except Exception as e:
         error_result = {

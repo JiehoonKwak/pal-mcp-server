@@ -8,30 +8,31 @@
 # ]
 # ///
 """
-PAL CodeReview - Comprehensive code review with external AI models.
+PAL TestGen - AI-powered test generation with comprehensive coverage.
 
 Run with uv (recommended):
-    uv run scripts/pal_codereview.py --files FILE [FILE ...] [options]
+    uv run scripts/pal_testgen.py --files FILE [FILE ...] [options]
 
 Usage:
-    python pal_codereview.py --files FILE [FILE ...] [options]
+    python pal_testgen.py --files FILE [FILE ...] [options]
 
 Options:
-    --files FILE [FILE ...]    Files to review (required)
-    --prompt PROMPT            Additional review instructions
-    --focus AREA [AREA ...]    Focus areas (security, performance, etc.)
+    --files FILE [FILE ...]    Files to generate tests for (required)
+    --prompt PROMPT            Additional instructions (e.g., "focus on edge cases")
     --model MODEL              Model to use (default: from config)
-    --continuation-id ID       Continue existing review conversation
+    --continuation-id ID       Continue existing conversation
+    --thinking-mode MODE       Thinking mode: minimal/low/medium/high/max (default: high)
+    --json                     Output as JSON
 
 Examples:
-    # Basic code review
-    python pal_codereview.py --files src/main.py
+    # Generate tests for a file
+    python pal_testgen.py --files src/auth.py
 
-    # Review with focus
-    python pal_codereview.py --files src/auth.py --focus security
+    # Focus on edge cases
+    python pal_testgen.py --files src/utils.py --prompt "focus on edge cases"
 
-    # Review multiple files
-    python pal_codereview.py --files src/*.py --focus performance maintainability
+    # Generate tests for multiple files
+    python pal_testgen.py --files src/api/*.py --thinking-mode max
 """
 
 import argparse
@@ -43,11 +44,11 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent / "lib"))
 
 from agentic import build_agentic_response, infer_confidence  # noqa: E402
-from conversation import ConversationMemory
-from file_utils import read_files
+from conversation import ConversationMemory  # noqa: E402
+from file_utils import read_files  # noqa: E402
 
-from config import load_config
-from providers import execute_request, get_provider
+from config import load_config  # noqa: E402
+from providers import execute_request, get_provider  # noqa: E402
 
 
 def load_prompt(prompt_name: str) -> str:
@@ -59,19 +60,17 @@ def load_prompt(prompt_name: str) -> str:
 
 
 def main():
-    parser = argparse.ArgumentParser(description="PAL CodeReview - Comprehensive code review with external AI models")
-    parser.add_argument("--files", nargs="+", required=True, help="Files to review")
-    parser.add_argument("--prompt", help="Additional review instructions")
-    parser.add_argument(
-        "--focus",
-        nargs="*",
-        default=[],
-        choices=["security", "performance", "maintainability", "architecture", "testing"],
-        help="Focus areas for the review",
-    )
+    parser = argparse.ArgumentParser(description="PAL TestGen - AI-powered test generation with comprehensive coverage")
+    parser.add_argument("--files", nargs="+", required=True, help="Files to generate tests for")
+    parser.add_argument("--prompt", help="Additional instructions (e.g., 'focus on edge cases')")
     parser.add_argument("--model", help="Model to use (default: from config)")
     parser.add_argument("--continuation-id", help="Continue existing conversation")
-    parser.add_argument("--thinking-mode", choices=["minimal", "low", "medium", "high", "max"])
+    parser.add_argument(
+        "--thinking-mode",
+        choices=["minimal", "low", "medium", "high", "max"],
+        default="high",
+        help="Thinking mode (default: high)",
+    )
     parser.add_argument("--json", action="store_true", help="Output as JSON")
 
     args = parser.parse_args()
@@ -90,18 +89,18 @@ def main():
             if thread:
                 conversation_history = memory.build_history(thread)
             else:
-                thread = memory.create_thread("codereview", {"files": args.files})
+                thread = memory.create_thread("testgen", {"files": args.files})
         else:
-            thread = memory.create_thread("codereview", {"files": args.files})
+            thread = memory.create_thread("testgen", {"files": args.files})
 
         # Load system prompt
-        system_prompt = load_prompt("codereview")
+        system_prompt = load_prompt("testgen")
 
         # Read files
         file_content = read_files(args.files, include_line_numbers=True)
 
         if not file_content.strip():
-            raise ValueError("No valid files found to review")
+            raise ValueError("No valid files found to generate tests for")
 
         # Build user prompt
         user_prompt_parts = []
@@ -109,24 +108,19 @@ def main():
         if conversation_history:
             user_prompt_parts.append(conversation_history)
 
-        user_prompt_parts.append("=== CODE TO REVIEW ===")
+        user_prompt_parts.append("=== CODE TO GENERATE TESTS FOR ===")
         user_prompt_parts.append(file_content)
-
-        # Add focus areas
-        if args.focus:
-            user_prompt_parts.append("\n=== FOCUS AREAS ===")
-            user_prompt_parts.append(f"Please focus on: {', '.join(args.focus)}")
 
         # Add custom prompt
         if args.prompt:
             user_prompt_parts.append("\n=== ADDITIONAL INSTRUCTIONS ===")
             user_prompt_parts.append(args.prompt)
 
-        user_prompt_parts.append("\n=== REVIEW REQUEST ===")
+        user_prompt_parts.append("\n=== TEST GENERATION REQUEST ===")
         user_prompt_parts.append(
-            "Please review the code above following the guidelines in your system prompt. "
-            "Identify issues by severity (Critical > High > Medium > Low) and provide "
-            "actionable fixes with specific line references."
+            "Please generate comprehensive tests for the code above following the guidelines "
+            "in your system prompt. Cover happy paths, edge cases, error scenarios, and "
+            "integration points. Use appropriate test framework conventions."
         )
 
         full_user_prompt = "\n\n".join(user_prompt_parts)
@@ -135,19 +129,14 @@ def main():
         model = args.model or config.get("defaults", {}).get("model", "auto")
         provider, resolved_model = get_provider(model, config)
 
-        # Get thinking mode
-        thinking_mode = args.thinking_mode
-        if thinking_mode is None:
-            thinking_mode = config.get("defaults", {}).get("thinking_mode", "medium")
-
-        # Execute request
+        # Execute request with high thinking mode by default for thorough analysis
         response = execute_request(
             provider=provider,
             prompt=full_user_prompt,
             model=resolved_model,
             system_prompt=system_prompt,
-            temperature=0.7,  # Lower temperature for precise analysis
-            thinking_mode=thinking_mode,
+            temperature=0.7,
+            thinking_mode=args.thinking_mode,
             config=config,
         )
 
@@ -155,31 +144,31 @@ def main():
         memory.add_turn(
             thread_id=thread["thread_id"],
             role="user",
-            content=f"Review files: {', '.join(args.files)}" + (f"\n{args.prompt}" if args.prompt else ""),
+            content=f"Generate tests for: {', '.join(args.files)}" + (f"\n{args.prompt}" if args.prompt else ""),
             files=args.files,
-            tool_name="codereview",
+            tool_name="testgen",
         )
 
         memory.add_turn(
             thread_id=thread["thread_id"],
             role="assistant",
             content=response["content"],
-            tool_name="codereview",
+            tool_name="testgen",
             model_name=resolved_model,
             model_provider=provider.provider_name,
         )
 
-        # Infer confidence from response
+        # Infer confidence from response (high default for test generation)
         confidence = infer_confidence(
             response["content"],
             has_errors=False,
-            has_warnings=True,
+            has_warnings=False,
             has_actionable_items=True,
         )
 
         # Build agentic result with rich metadata
         result = build_agentic_response(
-            tool_name="codereview",
+            tool_name="testgen",
             status="success",
             content=response["content"],
             continuation_id=thread["thread_id"],
@@ -195,11 +184,10 @@ def main():
         else:
             # Human-readable output with agentic metadata
             print(f"\n{'=' * 60}")
-            print("Code Review")
+            print("Test Generation")
             print(f"Files: {', '.join(args.files)}")
-            if args.focus:
-                print(f"Focus: {', '.join(args.focus)}")
             print(f"Model: {resolved_model} via {provider.provider_name}")
+            print(f"Thinking Mode: {args.thinking_mode}")
             print(f"Continuation ID: {thread['thread_id']}")
             print(f"Confidence: {confidence}")
             print(f"{'=' * 60}\n")

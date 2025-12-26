@@ -8,30 +8,31 @@
 # ]
 # ///
 """
-PAL CodeReview - Comprehensive code review with external AI models.
+PAL Refactor - Refactoring analysis with external AI models.
 
 Run with uv (recommended):
-    uv run scripts/pal_codereview.py --files FILE [FILE ...] [options]
+    uv run scripts/pal_refactor.py --files FILE [FILE ...] [options]
 
 Usage:
-    python pal_codereview.py --files FILE [FILE ...] [options]
+    python pal_refactor.py --files FILE [FILE ...] [options]
 
 Options:
-    --files FILE [FILE ...]    Files to review (required)
-    --prompt PROMPT            Additional review instructions
-    --focus AREA [AREA ...]    Focus areas (security, performance, etc.)
+    --files FILE [FILE ...]    Files to analyze (required)
+    --focus AREA               Focus area (codesmells, decompose, modernize, organization)
     --model MODEL              Model to use (default: from config)
-    --continuation-id ID       Continue existing review conversation
+    --continuation-id ID       Continue existing conversation
+    --thinking-mode MODE       Thinking mode (default: high)
+    --json                     Output as JSON
 
 Examples:
-    # Basic code review
-    python pal_codereview.py --files src/main.py
+    # Basic refactoring analysis
+    python pal_refactor.py --files src/main.py
 
-    # Review with focus
-    python pal_codereview.py --files src/auth.py --focus security
+    # Focus on code smells
+    python pal_refactor.py --files src/service.py --focus codesmells
 
-    # Review multiple files
-    python pal_codereview.py --files src/*.py --focus performance maintainability
+    # Focus on decomposition opportunities
+    python pal_refactor.py --files src/monolith.py --focus decompose
 """
 
 import argparse
@@ -42,12 +43,12 @@ from pathlib import Path
 # Add lib to path
 sys.path.insert(0, str(Path(__file__).parent / "lib"))
 
-from agentic import build_agentic_response, infer_confidence  # noqa: E402
-from conversation import ConversationMemory
-from file_utils import read_files
+from agentic import build_agentic_response  # noqa: E402
+from conversation import ConversationMemory  # noqa: E402
+from file_utils import read_files  # noqa: E402
 
-from config import load_config
-from providers import execute_request, get_provider
+from config import load_config  # noqa: E402
+from providers import execute_request, get_provider  # noqa: E402
 
 
 def load_prompt(prompt_name: str) -> str:
@@ -59,19 +60,21 @@ def load_prompt(prompt_name: str) -> str:
 
 
 def main():
-    parser = argparse.ArgumentParser(description="PAL CodeReview - Comprehensive code review with external AI models")
-    parser.add_argument("--files", nargs="+", required=True, help="Files to review")
-    parser.add_argument("--prompt", help="Additional review instructions")
+    parser = argparse.ArgumentParser(description="PAL Refactor - Refactoring analysis with external AI models")
+    parser.add_argument("--files", nargs="+", required=True, help="Files to analyze")
     parser.add_argument(
         "--focus",
-        nargs="*",
-        default=[],
-        choices=["security", "performance", "maintainability", "architecture", "testing"],
-        help="Focus areas for the review",
+        choices=["codesmells", "decompose", "modernize", "organization"],
+        help="Focus area for analysis",
     )
     parser.add_argument("--model", help="Model to use (default: from config)")
     parser.add_argument("--continuation-id", help="Continue existing conversation")
-    parser.add_argument("--thinking-mode", choices=["minimal", "low", "medium", "high", "max"])
+    parser.add_argument(
+        "--thinking-mode",
+        choices=["minimal", "low", "medium", "high", "max"],
+        default="high",
+        help="Thinking mode (default: high)",
+    )
     parser.add_argument("--json", action="store_true", help="Output as JSON")
 
     args = parser.parse_args()
@@ -90,18 +93,18 @@ def main():
             if thread:
                 conversation_history = memory.build_history(thread)
             else:
-                thread = memory.create_thread("codereview", {"files": args.files})
+                thread = memory.create_thread("refactor", {"files": args.files})
         else:
-            thread = memory.create_thread("codereview", {"files": args.files})
+            thread = memory.create_thread("refactor", {"files": args.files})
 
         # Load system prompt
-        system_prompt = load_prompt("codereview")
+        system_prompt = load_prompt("refactor")
 
         # Read files
         file_content = read_files(args.files, include_line_numbers=True)
 
         if not file_content.strip():
-            raise ValueError("No valid files found to review")
+            raise ValueError("No valid files found to analyze")
 
         # Build user prompt
         user_prompt_parts = []
@@ -109,24 +112,25 @@ def main():
         if conversation_history:
             user_prompt_parts.append(conversation_history)
 
-        user_prompt_parts.append("=== CODE TO REVIEW ===")
+        user_prompt_parts.append("=== CODE TO ANALYZE ===")
         user_prompt_parts.append(file_content)
 
-        # Add focus areas
+        # Add focus area
         if args.focus:
-            user_prompt_parts.append("\n=== FOCUS AREAS ===")
-            user_prompt_parts.append(f"Please focus on: {', '.join(args.focus)}")
+            user_prompt_parts.append("\n=== FOCUS AREA ===")
+            focus_descriptions = {
+                "codesmells": "Focus on code smells: long methods, deep nesting, duplicate code, complex conditionals, naming issues.",
+                "decompose": "Focus on decomposition: breaking up large components, single responsibility violations, extracting modules.",
+                "modernize": "Focus on modernization: deprecated patterns, language updates, library upgrades, removing legacy code.",
+                "organization": "Focus on organization: file structure, naming conventions, module boundaries, import patterns.",
+            }
+            user_prompt_parts.append(focus_descriptions[args.focus])
 
-        # Add custom prompt
-        if args.prompt:
-            user_prompt_parts.append("\n=== ADDITIONAL INSTRUCTIONS ===")
-            user_prompt_parts.append(args.prompt)
-
-        user_prompt_parts.append("\n=== REVIEW REQUEST ===")
+        user_prompt_parts.append("\n=== ANALYSIS REQUEST ===")
         user_prompt_parts.append(
-            "Please review the code above following the guidelines in your system prompt. "
-            "Identify issues by severity (Critical > High > Medium > Low) and provide "
-            "actionable fixes with specific line references."
+            "Please analyze the code above for refactoring opportunities. "
+            "Identify issues by severity (CRITICAL > HIGH > MEDIUM > LOW) and provide "
+            "specific suggestions with effort/benefit analysis."
         )
 
         full_user_prompt = "\n\n".join(user_prompt_parts)
@@ -135,19 +139,14 @@ def main():
         model = args.model or config.get("defaults", {}).get("model", "auto")
         provider, resolved_model = get_provider(model, config)
 
-        # Get thinking mode
-        thinking_mode = args.thinking_mode
-        if thinking_mode is None:
-            thinking_mode = config.get("defaults", {}).get("thinking_mode", "medium")
-
-        # Execute request
+        # Execute request with high thinking mode for deep analysis
         response = execute_request(
             provider=provider,
             prompt=full_user_prompt,
             model=resolved_model,
             system_prompt=system_prompt,
-            temperature=0.7,  # Lower temperature for precise analysis
-            thinking_mode=thinking_mode,
+            temperature=0.7,
+            thinking_mode=args.thinking_mode,
             config=config,
         )
 
@@ -155,38 +154,31 @@ def main():
         memory.add_turn(
             thread_id=thread["thread_id"],
             role="user",
-            content=f"Review files: {', '.join(args.files)}" + (f"\n{args.prompt}" if args.prompt else ""),
+            content=f"Analyze for refactoring: {', '.join(args.files)}"
+            + (f" (focus: {args.focus})" if args.focus else ""),
             files=args.files,
-            tool_name="codereview",
+            tool_name="refactor",
         )
 
         memory.add_turn(
             thread_id=thread["thread_id"],
             role="assistant",
             content=response["content"],
-            tool_name="codereview",
+            tool_name="refactor",
             model_name=resolved_model,
             model_provider=provider.provider_name,
         )
 
-        # Infer confidence from response
-        confidence = infer_confidence(
-            response["content"],
-            has_errors=False,
-            has_warnings=True,
-            has_actionable_items=True,
-        )
-
-        # Build agentic result with rich metadata
+        # Build agentic result with medium confidence (needs validation)
         result = build_agentic_response(
-            tool_name="codereview",
+            tool_name="refactor",
             status="success",
             content=response["content"],
             continuation_id=thread["thread_id"],
             model=resolved_model,
             provider=provider.provider_name,
             usage=response.get("usage", {}),
-            confidence=confidence,
+            confidence="medium",
             files_examined=args.files,
         )
 
@@ -195,13 +187,14 @@ def main():
         else:
             # Human-readable output with agentic metadata
             print(f"\n{'=' * 60}")
-            print("Code Review")
+            print("Refactoring Analysis")
             print(f"Files: {', '.join(args.files)}")
             if args.focus:
-                print(f"Focus: {', '.join(args.focus)}")
+                print(f"Focus: {args.focus}")
             print(f"Model: {resolved_model} via {provider.provider_name}")
+            print(f"Thinking Mode: {args.thinking_mode}")
             print(f"Continuation ID: {thread['thread_id']}")
-            print(f"Confidence: {confidence}")
+            print("Confidence: medium (requires validation)")
             print(f"{'=' * 60}\n")
             print(response["content"])
             print(f"\n{'=' * 60}")
